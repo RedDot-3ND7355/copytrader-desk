@@ -199,7 +199,7 @@ let ws, wsTry = 0;
 function connectWS() {
   if (!CFG.coins.length) return;
   try { ws = new WebSocket("wss://ws.kraken.com/v2"); } catch (e) { return; }
-  ws.onopen = () => { wsOK = true; wsTry = 0; ws.send(JSON.stringify({ method: "subscribe", params: { channel: "ticker", symbol: CFG.coins.map(c => c.ws) } })); };
+  ws.onopen = () => { wsOK = true; wsTry = 0; dirty = true; ws.send(JSON.stringify({ method: "subscribe", params: { channel: "ticker", symbol: CFG.coins.map(c => c.ws) } })); };
   ws.onmessage = m => {
     let j; try { j = JSON.parse(m.data); } catch (e) { return; }
     if (j.channel !== "ticker" || !j.data) return;
@@ -209,7 +209,7 @@ function connectWS() {
       priceTick(c.name, prev);
     }
   };
-  ws.onclose = ws.onerror = () => { wsOK = false; ws = null; setTimeout(connectWS, Math.min(30000, 2000 * ++wsTry)); };
+  ws.onclose = ws.onerror = () => { wsOK = false; dirty = true; ws = null; setTimeout(connectWS, Math.min(30000, 2000 * ++wsTry)); };
 }
 
 /* ---------- UI ---------- */

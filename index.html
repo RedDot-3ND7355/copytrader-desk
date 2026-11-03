@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<title>Copy Trader (PAPER)</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="favicon.png">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div id="app">
+  <header id="top">
+    <div class="row1">
+      <div class="brand"><span class="logo"></span>Copy Trader <span class="paper">PAPER</span></div>
+      <div id="livepill" class="livepill off"><i></i><span>CONNECTING</span></div>
+    </div>
+    <nav id="tabs" role="tablist">
+      <button data-tab="overview" class="on">Overview</button>
+      <button data-tab="agents">Agents</button>
+      <button data-tab="activity">Activity</button>
+      <button data-tab="trades">Trades</button>
+    </nav>
+  </header>
+  <main>
+    <section id="v-overview" class="view"></section>
+    <section id="v-agents" class="view" hidden></section>
+    <section id="v-activity" class="view" hidden></section>
+    <section id="v-trades" class="view" hidden></section>
+  </main>
+</div>
+<script src="app.js"></script>
+</body>
+</html>

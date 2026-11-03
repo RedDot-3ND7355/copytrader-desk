@@ -265,3 +265,23 @@ main{padding:12px 14px}
 .cells .c b.two u{text-decoration:none;font-size:8px;margin-left:2px;color:var(--tx2);font-weight:600}
 #agents.compact .mini .cells .c b.two{font-size:11px}
 #agents.compact .mini .cells .c b.two+i{display:none}
+
+/* ---- live holdings ---- */
+.wcols .n.up,.wst b.up,.mv.up,.hr2 b.up,.g4 b.up{animation:tickup .9s}
+.wcols .n.dn,.wst b.dn,.mv.dn,.hr2 b.dn,.g4 b.dn{animation:tickdn .9s}
+.sb2{font-size:10.5px;color:#6b6b70;margin-top:3px;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.eqline{font-size:11.5px;color:var(--tx2);margin-top:10px;font-variant-numeric:tabular-nums}.eqline b{color:var(--tx);font-weight:600}
+.hold{padding:9px 0;border-top:1px solid var(--line)}
+.sec+.hold{border-top:0}
+.hold .hr{display:flex;align-items:center;gap:8px}
+.hold .cn{font-size:14px}
+.hold .mv{margin-left:auto;font-size:15px;font-variant-numeric:tabular-nums}
+.src{font-size:8.5px;font-weight:800;letter-spacing:.6px;padding:2px 5px;border-radius:5px;border:1px solid #333;color:var(--tx2)}
+.src.on{color:var(--green);border-color:#17421f;background:#08150b}
+.hold .hr2{display:flex;justify-content:space-between;font-size:11.5px;color:var(--tx2);margin-top:3px;font-variant-numeric:tabular-nums}
+.hold .hr2 b{font-weight:700}
+.g4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;margin-top:8px;padding:7px 8px;background:#000;border:1px solid var(--line);border-radius:9px}
+.g4 div{font-size:9px;letter-spacing:.6px;text-transform:uppercase;color:var(--tx2);font-weight:600;min-width:0}
+.g4 b{display:block;font-size:11.5px;letter-spacing:0;text-transform:none;color:var(--tx);margin-top:2px;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.hold .tw{margin-top:6px}
+.tl{flex-wrap:wrap;gap:2px 8px}

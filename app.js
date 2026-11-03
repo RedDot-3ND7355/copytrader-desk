@@ -134,7 +134,7 @@ setInterval(tick, 100);
 /* ---------- data ---------- */
 async function getJSON(name) {
   for (const base of SOURCES) {
-    try { const r = await fetch(base + name + "?t=" + Math.floor(Date.now() / 20000), { cache: "no-store" }); if (r.ok) return await r.json(); } catch (e) {}
+    try { const ac = new AbortController(), tm = setTimeout(() => ac.abort(), 12000); const r = await fetch(base + name + "?t=" + Math.floor(Date.now() / 20000), { cache: "no-store", signal: ac.signal }); clearTimeout(tm); if (r.ok) return await r.json(); } catch (e) {}
   }
   return null;
 }

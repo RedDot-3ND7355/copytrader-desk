@@ -2,7 +2,7 @@
 /* Copy Trader desk - PAPER only. Vanilla JS, no build step. Data: app-data.json (state + last events) + events-<night>.json (whole night) */
 const Q = new URLSearchParams(location.search);
 const SOURCES = Q.get("data") ? [Q.get("data").replace(/\/?$/, "/")] : [];
-const POLL_MS = 25000, DRIP_S = 12;
+const POLL_MS = 10000;
 const ST = [
   { k: "scout", name: "Scout", role: "scans the coins", c: "var(--blue)", act: "SCANNING", ic: '<circle cx="11" cy="11" r="6"/><path d="M21 21l-5.2-5.2"/>' },
   { k: "filter", name: "Filter", role: "trend, BTC & volume gates", c: "var(--orange)", act: "FILTERING", ic: '<path d="M3 5h18l-7 8v6l-4 2v-8z"/>' },
@@ -11,6 +11,7 @@ const ST = [
   { k: "posmgr", name: "Position manager", role: "exits", c: "var(--yellow)", act: "MANAGING", ic: '<path d="M3 17l5-6 4 3 5-8 4 4"/><path d="M3 21h18"/>' },
 ];
 const SBY = Object.fromEntries(ST.map(s => [s.k, s]));
+const LOGS = { scout: ["scout", "var(--blue)"], filter: ["filter", "var(--orange)"], risk: ["risk", "var(--red)"], executor: ["executor", "var(--green)"], posmgr: ["posmgr", "var(--yellow)"], supervisor: ["super", "var(--indigo)"], queue: ["queue", "#888"] };
 const $ = (s, r = document) => r.querySelector(s);
 const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const TZ = "America/Toronto";
@@ -23,7 +24,7 @@ const ago = s => s < 5 ? "now" : s < 90 ? Math.round(s) + "s ago" : s < 5400 ? M
 const perf = () => performance.now();
 
 let D = null, CFG = { currency: "CAD", start_capital: 100, risk_pct: 10, max_positions: 2, daily_stop_pct: 5, coins: [] };
-let EV = [], cur = 0, S = null, mode = "live", speed = 10, simT = 0, lastTick = perf(), dirty = true, lastFetchOK = 0, offline = false;
+let EV = [], cur = 0, S = null, mode = "live", speed = 10, lastTick = perf(), dirty = true, lastFetchOK = 0, offline = false;
 const LIVE = {};   // WS prices: coin -> {last, pct}
 let wsOK = false;
 
@@ -113,8 +114,8 @@ function apply(s, e, fx) {
     const id = +String(e.item).replace("pos-", ""), p = s.pos[id];
     if (p) { if (v.bid != null) p.bid = v.bid; if (v.stop != null) p.stop = v.stop; if (v.stop_kind) p.kind = v.stop_kind; if (v.peak != null) p.peak = v.peak; }
   }
-  if (e.stage !== "server" && e.stage !== "queue") {
-    s.log.push(e); if (s.log.length > 60) s.log.shift();
+  if (e.stage !== "server") {
+    s.log.push(e); if (s.log.length > 2500) s.log.shift();
   }
 }
 
@@ -123,30 +124,38 @@ function seek(n, fx) {
   n = Math.max(0, Math.min(EV.length, n));
   if (n < cur || !S) { S = newState(); cur = 0; }
   while (cur < n) apply(S, EV[cur], fx && n - cur <= 40), cur++;
-  if (cur) simT = EV[cur - 1].ts;
-  dirty = true;
+  nextAt = 0; dirty = true;
+}
+/* Replay & live drip are EVENT-STEPPED: one event is applied at a time (glow, counter tick, log line), and the speed button sets the delay between events.
+   Idle gaps are compressed: the delay grows with the real gap but is capped at the max below, so a quiet hour never freezes the replay. */
+const GAPS = { 1: [700, 1500], 10: [260, 700], 60: [90, 260], 300: [28, 90] };   // speed -> [min, max] ms between events
+const stepMs = () => GAPS[speed] || GAPS[60];
+function delayFor(i) {            // ms to wait before showing EV[i]
+  const [lo, hi] = stepMs(), gap = i > 0 ? EV[i].ts - EV[i - 1].ts : 30;
+  return lo + (hi - lo) * Math.min(1, Math.max(0, gap) / 90);
 }
 function tick() {
-  const now = perf(), dt = (now - lastTick) / 1000; lastTick = now;
+  const now = perf(); lastTick = now;
   if (mode !== "pause" && cur < EV.length) {
-    let rate = 1;
-    if (mode === "replay") rate = speed;
-    else { const back = EV[EV.length - 1].ts - simT; rate = Math.max(1, back / DRIP_S); }
-    if (!simT && cur) simT = EV[cur - 1].ts;
-    simT += dt * rate; let moved = false;
-    while (cur < EV.length && EV[cur].ts <= simT) { apply(S, EV[cur++], true); moved = true; }
-    if (moved) dirty = true;
-    if (cur >= EV.length && mode === "replay") { mode = "live"; dirty = true; }
+    const back = EV.length - cur;
+    const dl = i => mode === "replay" ? delayFor(i) : Math.min(1200, Math.max(100, 12000 / back));   // live: drip a backlog out over ~12 s
+    if (!nextAt) nextAt = now + (mode === "replay" ? dl(cur) : 0);
+    let n = 0;
+    while (cur < EV.length && now >= nextAt && n < 4) { apply(S, EV[cur++], true); n++; nextAt = cur < EV.length ? Math.max(nextAt + dl(cur), now - 200 + 10) : 0; }
+    if (n) dirty = true;
+    if (cur >= EV.length && mode === "replay") { mode = "live"; nextAt = 0; dirty = true; }
   }
   if (dirty) { render(); dirty = false; }
   else if ((now | 0) % 1000 < 120) renderLight();
 }
-setInterval(tick, 100);
+let nextAt = 0;
+function step(d) { if (mode !== "pause") mode = "pause"; seek(cur + d, d > 0); }
+setInterval(tick, 25);
 
 /* ---------- data ----------
    Sources (the page itself lives on github.io, and raw.githubusercontent.com can answer 404 / be cached ~5 min there, so there are three):
-   1. raw `data` branch   - refreshed every minute by the publisher, CDN-cached up to 5 min
-   2. GitHub API contents - always fresh (60 s cache) but unauthenticated limit is 60 req/h, so used only when 1+3 are stale, max 1 per 90 s, only 00:00-08:45 ET
+   1. GitHub API contents of the `data` branch (ETag-revalidated, ~1 s behind the publisher) - the live path, only 23:54-08:45 ET
+   2. raw `data` branch   - same files but the CDN keeps them 5 min (query strings are ignored), so fallback only
    3. ./data/ on Pages    - published every 10 min, always reachable
    The freshest copy (generated_at) wins. ?data=<dir/> overrides everything (demo / local preview). */
 const REPO = "RedDot-3ND7355/copytrader-desk";
@@ -155,34 +164,46 @@ let apiOKAt = 0, lastEvFetch = Date.now();
 async function tryOne(url, headers) {
   try {
     const ac = new AbortController(), tm = setTimeout(() => ac.abort(), 12000);
-    const r = await fetch(url + (url.includes("?") ? "&" : "?") + "t=" + Math.floor(Date.now() / 20000), { cache: "no-store", signal: ac.signal, headers });
+    const r = await fetch(url + (url.includes("?") ? "&" : "?") + "t=" + Date.now(), { cache: "no-store", signal: ac.signal, headers });
     clearTimeout(tm);
     if (r.ok) return await r.json();
-    if (r.status === 403 || r.status === 429) apiOKAt = Math.max(apiOKAt, Date.now() + 15 * 60000);
   } catch (e) {}
   return null;
 }
 const etHour = () => { const p = new Intl.DateTimeFormat("en-GB", { timeZone: TZ, hour: "2-digit", minute: "2-digit", hour12: false }).formatToParts(new Date()); return +p[0].value + +p[2].value / 60; };
 async function getJSON(name) {          // static-ish file (events): first source that answers
   if (Q.get("data")) return tryOne(SOURCES[0] + name);
-  return (await tryOne(RAWB + name)) || (await tryOne(PAGES + name)) || (await tryOne(APIB + name + "?ref=data", { Accept: "application/vnd.github.raw" }));
+  return (await tryOne(RAWB + name)) || (await tryOne(PAGES + name)) || (await tryApi(name));
 }
+/* GitHub API contents with ETag revalidation (cache:"no-cache"): the browser sends If-None-Match, an unchanged file answers 304 (free, not counted against
+   the 60 req/h unauthenticated limit) and a changed one is served within ~1 s of the publisher's commit. raw.githubusercontent.com ignores query strings and
+   keeps a file cached for 5 min, so it is only the fallback. */
+async function tryApi(name) {
+  if (Date.now() < apiOKAt) return null;
+  try {
+    const ac = new AbortController(), tm = setTimeout(() => ac.abort(), 12000);
+    const r = await fetch(APIB + name + "?ref=data", { cache: "no-cache", signal: ac.signal, headers: { Accept: "application/vnd.github.raw" } });
+    clearTimeout(tm);
+    const rem = +r.headers.get("x-ratelimit-remaining"), rst = +r.headers.get("x-ratelimit-reset");
+    if (r.status === 403 || r.status === 429) { apiOKAt = rst ? rst * 1000 + 1000 : Date.now() + 15 * 60000; return null; }
+    if (r.ok) { if (r.headers.has("x-ratelimit-remaining") && rem < 6 && rst) apiOKAt = rst * 1000 + 1000; return await r.json(); }
+  } catch (e) {}
+  return null;
+}
+const apiWindow = () => { const h = etHour(); return Q.get("api") === "1" || h < 8.75 || h >= 23.9; };
 async function getState() {
   if (Q.get("data")) return tryOne(SOURCES[0] + "app-data.json");
-  const got = (await Promise.all([tryOne(RAWB + "app-data.json"), tryOne(PAGES + "app-data.json")])).filter(Boolean).sort((x, y) => y.generated_at - x.generated_at);
-  let best = got[0] || null;
-  const age = best ? Date.now() / 1000 - best.generated_at : 1e9;
-  if (age > 150 && Date.now() > apiOKAt && etHour() < 8.75) {
-    apiOKAt = Date.now() + 90000;
-    const c = await tryOne(APIB + "app-data.json?ref=data", { Accept: "application/vnd.github.raw" });
-    if (c && (!best || c.generated_at > best.generated_at)) best = c;
+  let best = apiWindow() ? await tryApi("app-data.json") : null;
+  if (!best || Date.now() / 1000 - best.generated_at > 150) {
+    const got = [best, ...(await Promise.all([tryOne(RAWB + "app-data.json"), tryOne(PAGES + "app-data.json")]))].filter(Boolean).sort((x, y) => y.generated_at - x.generated_at);
+    best = got[0] || null;
   }
   return best;
 }
 const norm = r => ({ seq: r[0], ts: r[1], stage: r[2], item: r[3], decision: r[4], reason: r[5], v: r[6] || {} });
-async function loadEvents(d) {
-  const f = await getJSON(d.events_file);
-  return f ? f.rows.map(norm).filter(e => e.stage !== "server" && e.stage !== "queue") : [];
+async function loadEvents(d, fresh) {
+  const f = fresh && !Q.get("data") && apiWindow() ? ((await tryApi(d.events_file)) || await getJSON(d.events_file)) : await getJSON(d.events_file);
+  return f ? f.rows.map(norm).filter(e => e.stage !== "server") : [];
 }
 async function poll(first) {
   const d = await getState();
@@ -191,20 +212,22 @@ async function poll(first) {
   const newNight = D && D.night !== d.night;
   D = d; CFG = d.cfg || CFG;
   if (first || newNight) {
-    EV = await loadEvents(d); mergeTail(d.tail);
+    EV = await loadEvents(d);
+    if (d.tail.length && d.tail[0][0] > (EV.length ? EV[EV.length - 1].seq : 0) + 1) EV = await loadEvents(d, true);   // cached events file is older than the tail: fetch the fresh one
+    mergeTail(d.tail);
     S = null; cur = 0; buildCoinChips(); seek(EV.length, false);
     const sk = parseFloat(Q.get("seek")); if (!isNaN(sk)) { mode = "pause"; seek(Math.round(EV.length * sk), false); }
-    if (Q.get("replay")) { speed = +Q.get("speed") || 60; seek(0, false); mode = "replay"; simT = EV.length ? EV[0].ts - 1 : 0; }
+    if (Q.get("replay")) { speed = +Q.get("speed") || 60; if (!GAPS[speed]) speed = Object.keys(GAPS).map(Number).reduce((a, b) => Math.abs(b - speed) < Math.abs(a - speed) ? b : a); seek(0, false); mode = "replay"; nextAt = 0; }
   } else {
     const had = EV.length; const last = had ? EV[had - 1].seq : 0;
-    if (d.tail.length && d.tail[0][0] > last + 1 && had && Date.now() - lastEvFetch > 300000) { lastEvFetch = Date.now(); EV = await loadEvents(d); mergeTail(d.tail); if (cur > EV.length) cur = EV.length; }
+    if (d.tail.length && d.tail[0][0] > last + 1 && had && Date.now() - lastEvFetch > 45000) { lastEvFetch = Date.now(); EV = await loadEvents(d, true); mergeTail(d.tail); if (cur > EV.length) cur = EV.length; }
     else mergeTail(d.tail);
   }
   dirty = true;
 }
 function mergeTail(tail) {
   let last = EV.length ? EV[EV.length - 1].seq : 0;
-  for (const r of tail || []) if (r[0] > last && r[2] !== "server" && r[2] !== "queue") { EV.push(norm(r)); last = r[0]; }
+  for (const r of tail || []) if (r[0] > last && r[2] !== "server") { EV.push(norm(r)); last = r[0]; }
 }
 
 /* ---------- Kraken WS (public prices) ---------- */
@@ -248,24 +271,31 @@ function build() {
   $("#v-agents").innerHTML = `
   <div class="ctl">
     <div class="seg"><button data-m="pause"><svg viewBox="0 0 12 12"><path d="M2 1h3v10H2zM7 1h3v10H7z"/></svg>Pause</button><button data-m="live"><svg viewBox="0 0 12 12"><circle cx="6" cy="6" r="4"/></svg>Live</button><button data-m="replay"><svg viewBox="0 0 12 12"><path d="M3 1l8 5-8 5z"/></svg>Replay</button></div>
-    <div class="spd" id="spd">${[1, 10, 60, 300].map(x => `<button data-s="${x}">${x}x</button>`).join("")}</div>
-    <div class="scrub"><input type="range" id="scrub" min="0" max="0" value="0"><span id="evc">event 0 / 0</span></div>
+    <div class="spd">${[1, 10, 60, 300].map(x => `<button data-s="${x}">${x}x</button>`).join("")}</div>
+    <div class="scrub"><button class="stp" data-st="-1" aria-label="Step back one event"><svg viewBox="0 0 12 12"><path d="M2 1h1.6v10H2zM11 1v10L4.5 6z"/></svg></button><input type="range" class="scr" min="0" max="0" value="0"><button class="stp" data-st="1" aria-label="Step forward one event"><svg viewBox="0 0 12 12"><path d="M8.4 1H10v10H8.4zM1 1l6.5 5L1 11z"/></svg></button><span class="evc">event 0 / 0</span></div>
   </div>
   <div class="vt"><span class="agents-hint" id="ahint"></span><button id="cmp" aria-pressed="false"><svg viewBox="0 0 12 12"><path d="M1 1h4v4H1zM7 1h4v4H7zM1 7h4v4H1zM7 7h4v4H7z"/></svg>Compact</button></div>
   <div id="agents">${ST.map(s => `<div class="agent idle" id="ag-${s.k}" style="--ac:${s.c}"><div class="ic"><svg viewBox="0 0 24 24">${s.ic}</svg></div><div class="bd"><div class="nm">${s.name}<small>${s.role}</small></div><div class="doing">Waiting…</div></div><div class="pillo">IDLE</div><div class="mini" id="mini-${s.k}"></div><div class="det" id="det-${s.k}"></div></div>`).join("")}
   <div class="agent idle" id="ag-sup" style="--ac:var(--indigo)"><div class="ic"><svg viewBox="0 0 24 24"><path d="M12 3v4M12 17v4M3 12h4M17 12h4"/><circle cx="12" cy="12" r="3.5"/></svg></div><div class="bd"><div class="nm">Supervisor<small>workers, restarts &amp; publisher</small></div><div class="doing">Waiting…</div></div><div class="pillo">—</div><div class="mini" id="mini-sup"></div><div class="det" id="det-sup"></div></div></div>`;
   $("#v-activity").innerHTML = `
-  <div class="h"><span>Funnel</span><span class="mono" id="fun-n" style="letter-spacing:0;text-transform:none"></span></div>
-  <div class="card fun" id="fun"></div>
+  <div class="ctl">
+    <div class="seg"><button data-m="pause"><svg viewBox="0 0 12 12"><path d="M2 1h3v10H2zM7 1h3v10H7z"/></svg>Pause</button><button data-m="live"><svg viewBox="0 0 12 12"><circle cx="6" cy="6" r="4"/></svg>Live</button><button data-m="replay"><svg viewBox="0 0 12 12"><path d="M3 1l8 5-8 5z"/></svg>Replay</button></div>
+    <div class="spd">${[1, 10, 60, 300].map(x => `<button data-s="${x}">${x}x</button>`).join("")}</div>
+    <div class="scrub"><button class="stp" data-st="-1" aria-label="Step back one event"><svg viewBox="0 0 12 12"><path d="M2 1h1.6v10H2zM11 1v10L4.5 6z"/></svg></button><input type="range" class="scr" min="0" max="0" value="0"><button class="stp" data-st="1" aria-label="Step forward one event"><svg viewBox="0 0 12 12"><path d="M8.4 1H10v10H8.4zM1 1l6.5 5L1 11z"/></svg></button><span class="evc">event 0 / 0</span></div>
+  </div>
   <div class="h"><span>Log</span></div>
-  <div class="logbox"><div class="lh"><span>logger.tail</span><span id="log-st">● live</span></div><div class="log" id="log"></div></div>`;
+  <div class="logbox"><div class="lh"><span>logger.tail <em id="log-n"></em></span><span id="log-st">● live</span></div><div class="log" id="log"></div><button id="log-more" hidden></button></div>
+  <div class="h"><span>Funnel</span><span class="mono" id="fun-n" style="letter-spacing:0;text-transform:none"></span></div>
+  <div class="card fun" id="fun"></div>`;
   $("#v-trades").innerHTML = `<div id="tr-sum" class="h"></div><div id="tr-open"></div><div class="h" id="tr-ch"><span>Closed</span></div><div id="tr-closed"></div>`;
   for (const b of document.querySelectorAll(".seg button")) b.onclick = () => setMode(b.dataset.m);
   for (const h of document.querySelectorAll(".agent")) h.onclick = e => { if (e.target.closest(".det") || COMPACT) return; h.classList.toggle("fold"); };
   $("#cmp").onclick = () => setCompact(!COMPACT);
   setCompact(COMPACT, true);
-  for (const b of document.querySelectorAll("#spd button")) b.onclick = () => { speed = +b.dataset.s; dirty = true; };
-  $("#scrub").oninput = e => { if (mode === "live" || mode === "replay") mode = "pause"; seek(+e.target.value, true); };
+  for (const b of document.querySelectorAll(".spd button")) b.onclick = () => { speed = +b.dataset.s; nextAt = 0; dirty = true; };
+  for (const b of document.querySelectorAll(".stp")) b.onclick = () => step(+b.dataset.st);
+  for (const r of document.querySelectorAll(".scr")) r.oninput = e => { if (mode === "live" || mode === "replay") mode = "pause"; seek(+e.target.value, true); };
+  $("#log-more").onclick = () => { logShow += 300; dirty = true; };
   for (const b of document.querySelectorAll("#tabs button")) b.onclick = () => tab(b.dataset.tab);
   for (const b of document.querySelectorAll("#strip .sc")) b.onclick = () => tab("agents");
 }
@@ -277,8 +307,8 @@ function setCompact(on, init) {
   dirty = true; if (!init) window.scrollTo(0, 0);
 }
 function setMode(m) {
-  if (m === "replay") { if (mode !== "pause" || cur >= EV.length) { seek(0, false); simT = EV.length ? EV[0].ts - 1 : 0; } mode = "replay"; }
-  else if (m === "live") { mode = "live"; if (EV.length - cur > 400) seek(EV.length, true); }
+  if (m === "replay") { if (mode !== "pause" || cur >= EV.length) { seek(0, false); } mode = "replay"; nextAt = 0; }
+  else if (m === "live") { mode = "live"; nextAt = 0; if (EV.length - cur > 400) seek(EV.length, true); }
   else mode = "pause";
   dirty = true;
 }
@@ -363,11 +393,12 @@ function render() {
   $("#wsstat").style.color = wsOK ? "var(--green)" : "var(--tx2)";
   setT($("#foot"), `${Q.get("data") ? "DEMO DATA (synthetic, not a real night) · " : ""}Night ${D ? D.night : "—"} · PAPER money only, no real orders · ${D ? "updated " + fD.format(new Date(D.generated_at * 1000)) + " ET" : ""}`);
   // agents
-  const sc = $("#scrub"); if (+sc.max !== EV.length) sc.max = EV.length; if (document.activeElement !== sc || mode === "replay") sc.value = cur;
-  setT($("#evc"), `event ${cur} / ${EV.length}`);
+  for (const sc of document.querySelectorAll(".scr")) { if (+sc.max !== EV.length) sc.max = EV.length; if (document.activeElement !== sc || mode !== "pause") sc.value = cur; }
+  for (const el of document.querySelectorAll(".evc")) setT(el, `event ${cur} / ${EV.length}`);
+  for (const b of document.querySelectorAll(".stp")) b.disabled = +b.dataset.st < 0 ? cur <= 0 : cur >= EV.length;
   for (const b of document.querySelectorAll(".seg button")) b.classList.toggle("on", b.dataset.m === mode);
-  for (const b of document.querySelectorAll("#spd button")) b.classList.toggle("on", +b.dataset.s === speed);
-  $("#spd").classList.toggle("off", mode !== "replay");
+  for (const b of document.querySelectorAll(".spd button")) b.classList.toggle("on", +b.dataset.s === speed);
+  for (const el of document.querySelectorAll(".spd")) el.classList.toggle("off", mode !== "replay");
   const nopen = Object.keys(S.pos).length, now = perf();
   for (const s of ST) {
     const el = $("#ag-" + s.k), ev = S.last[s.k], act = S.at[s.k] && now - S.at[s.k] < 1800;
@@ -559,14 +590,22 @@ function renderFunnel() {
   h += row("Trades opened", S.buys, "var(--green)", "tot");
   setH($("#fun"), h); setT($("#fun-n"), `${S.scanned} scans → ${S.buys} trade${S.buys == 1 ? "" : "s"}`);
 }
+let logShow = 300;
+const logRow = (e, cls) => { const L = LOGS[e.stage] || [e.stage, "#888"]; return `<div${cls ? ` class="${cls}"` : ""}><span class="t">${hms(e.ts)}</span> <span class="s" style="color:${L[1]}">${esc(L[0])}</span>${esc(describe(e))}</div>`; };
 function renderLog() {
   if (!isOpenView("activity")) return;
-  const box = $("#log"), tail = S.log.slice(-40); const key = tail.length ? tail[tail.length - 1].seq + ":" + tail.length : "";
-  if (box._k === key) return; const prev = box._k; box._k = key;
-  const nearEnd = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
-  box.innerHTML = tail.map(e => { const st = SBY[e.stage]; return `<div${e.seq > (box._seq || 1e12) ? ' class="new"' : ""}><span class="t">${hms(e.ts)}</span> <span class="s" style="color:${st ? st.c : "#888"}">${esc(e.stage)}</span>${esc(describe(e))}</div>`; }).join("") || '<div class="dim">no events yet</div>';
-  box._seq = tail.length ? tail[tail.length - 1].seq : 0;
-  if (nearEnd || !prev) box.scrollTop = box.scrollHeight;
+  const box = $("#log"), all = S.log, tail = all.slice(-logShow), lastE = tail[tail.length - 1];
+  const key = (lastE ? lastE.seq : 0) + ":" + tail.length + ":" + logShow + ":" + mode;
+  if (box._k === key) return; box._k = key;
+  const nearEnd = box.scrollHeight - box.scrollTop - box.clientHeight < 40, first = box._seq == null;
+  const ix = box._seq != null && box._sh === logShow ? tail.findIndex(e => e.seq === box._seq) : -1;
+  if (ix >= 0) {
+    if (ix < tail.length - 1) { box.insertAdjacentHTML("beforeend", tail.slice(ix + 1).map(e => logRow(e, "new")).join("")); while (box.children.length > logShow) box.firstChild.remove(); }
+  } else box.innerHTML = tail.map(e => logRow(e)).join("") || '<div class="dim">no events yet</div>';
+  box._seq = lastE ? lastE.seq : null; box._sh = logShow;
+  if (nearEnd || first || ix < 0) box.scrollTop = box.scrollHeight;
+  setT($("#log-n"), `· ${nf(all.length)} lines${all.length > tail.length ? " · last " + nf(tail.length) : ""}`);
+  const mo = $("#log-more"); mo.hidden = all.length <= tail.length; if (!mo.hidden) setT(mo, `Show ${Math.min(300, all.length - tail.length)} earlier lines`);
   setT($("#log-st"), mode === "replay" ? "● replay " + speed + "x" : mode === "pause" ? "❚❚ paused" : "● live");
 }
 function renderTrades() {
@@ -591,6 +630,6 @@ function renderTrades() {
 build();
 tab((location.hash || "#overview").slice(1).replace(/[^a-z]/g, "") && $("#v-" + location.hash.slice(1)) ? location.hash.slice(1) : "overview");
 poll(true).then(() => { if (D) connectWS(); else setTimeout(() => poll(true).then(() => D && connectWS()), 8000); });
-setInterval(() => poll(false), POLL_MS);
+setInterval(() => { if (!document.hidden) poll(false); }, POLL_MS);
 document.addEventListener("visibilitychange", () => { if (!document.hidden) poll(false); });
 if ("serviceWorker" in navigator && location.protocol.startsWith("http") && !Q.get("nosw")) navigator.serviceWorker.register("sw.js").catch(() => {});

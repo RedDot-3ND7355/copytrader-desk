@@ -12,3 +12,6 @@ Two paper wallets, never converted: CAD (BTC ETH SOL XRP DOGE PEPE, CAD pairs) a
 
 ## v9 — live holdings value
 Wallet tab and Overview now value open holdings at live Kraken prices (WebSocket plus a 7 s public REST Ticker poll as backup; CAD pairs for the CAD wallet, USD pairs for the USD wallet). Per holding: qty, avg entry, live price, live value, unrealised P&L ($ and %). Per wallet: cash + holdings = equity. Replay/pause value at event prices at the cursor and say so. Demo mode simulates small price ticks. SW cache ct-v9.
+
+## v10 — updates reach the installed app on one open
+App shell (index.html, app.js, styles.css) is served network-first by the service worker (revalidated, cache is only an offline / >6 s fallback). `sw.js` is registered with `updateViaCache:"none"`; the page calls `reg.update()` on load, on return to foreground, and every 30 min, and reloads once on `controllerchange` (15 s loop guard). A one-time bridge in `activate` reloads open pages that were running the old stale-while-revalidate versions (ct-v1..v9). Header shows the running version (v10). SW cache ct-v10.

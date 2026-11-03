@@ -28,6 +28,35 @@ let D = null, CFG = { currency: "CAD", start_capital: 100, risk_pct: 10, max_pos
 let EV = [], cur = 0, S = null, mode = "live", speed = 10, lastTick = perf(), dirty = true, lastFetchOK = 0, offline = false;
 const LIVE = {};   // WS prices: coin -> {last, pct}
 let wsOK = false;
+const DEMO = !!Q.get("data") && Q.get("livepx") !== "1";      // demo data is synthetic: never mix real Kraken prices into it, simulate small ticks instead
+let restOKAt = 0, pxDirty = false, lastPxR = 0;
+const livePx = c => { const l = LIVE[c]; return l && Date.now() - l.ts < 90000 ? l.last : null; };       // a price older than 90 s is not "live"
+const feedOK = () => DEMO || wsOK || Date.now() - restOKAt < 30000;
+const isHeld = name => !!S && Object.values(S.pos).some(p => p.coin === name);
+function setLive(name, last, bid, pct) { const o = LIVE[name], prev = o && o.last; LIVE[name] = { last, bid, pct: pct != null ? pct : o && o.pct, ts: Date.now() }; priceTick(name, prev); }
+/* Public Kraken ticker over REST every 7 s (CAD pairs for the CAD wallet, USD pairs for the USD wallet) as a backup to the WebSocket */
+const kNorm = k => k.replace(/^X(?=[A-Z]{3,4}Z)/, "").replace("XBT", "BTC").replace(/Z(?=(CAD|USD)$)/, "");
+async function pollRest() {
+  if (DEMO || document.hidden || !CFG.coins.length) return;
+  try {
+    const ac = new AbortController(), tm = setTimeout(() => ac.abort(), 8000);
+    const r = await fetch("https://api.kraken.com/0/public/Ticker?pair=" + CFG.coins.map(c => c.pair).join(","), { cache: "no-store", signal: ac.signal }); clearTimeout(tm);
+    const j = await r.json(); if (!j.result) return;
+    const by = {}; for (const k in j.result) by[kNorm(k)] = j.result[k];
+    let n = 0;
+    for (const c of CFG.coins) { const x = by[c.pair] || j.result[c.pair]; if (!x) continue; n++;
+      const o = LIVE[c.name]; if (o && Date.now() - o.ts < 6000) continue;                   // the WebSocket is fresher
+      setLive(c.name, +x.c[0], +x.b[0], (+x.c[0] / +x.o - 1) * 100); }
+    if (n) { restOKAt = Date.now(); dirty = true; }
+  } catch (e) {}
+}
+setInterval(pollRest, 7000);
+let demoTimer = 0;
+function demoFeed() {       // simulated ±0.08% ticks around the demo prices so the live view can be seen moving
+  if (demoTimer) return;
+  demoTimer = setInterval(() => { if (!S || mode !== "live" || cur < EV.length) return;
+    for (const p of Object.values(S.pos)) { const o = LIVE[p.coin], b = o && Date.now() - o.ts < 10000 ? o.last : p.bid; setLive(p.coin, b * (1 + (Math.random() - .5) * 0.0016), null); } }, 2500);
+}
 
 /* ---------- wallets: a CAD wallet and a USD wallet, never converted into each other ---------- */
 const WAL = () => CFG.wallets && CFG.wallets.length ? CFG.wallets : [{ id: CFG.currency, currency: CFG.currency, start_capital: CFG.start_capital }];
@@ -166,6 +195,7 @@ function tick() {
     if (n) dirty = true;
     if (cur >= EV.length && mode === "replay") { mode = "live"; nextAt = 0; dirty = true; }
   }
+  if (pxDirty && now - lastPxR > 300) { dirty = true; pxDirty = false; lastPxR = now; }
   if (dirty) { render(); dirty = false; }
   else if ((now | 0) % 1000 < 120) renderLight();
 }
@@ -255,6 +285,8 @@ function mergeTail(tail) {
 let ws, wsTry = 0;
 function connectWS() {
   if (!CFG.coins.length) return;
+  if (DEMO) return demoFeed();
+  pollRest();
   try { ws = new WebSocket("wss://ws.kraken.com/v2"); } catch (e) { return; }
   ws.onopen = () => { wsOK = true; wsTry = 0; dirty = true; ws.send(JSON.stringify({ method: "subscribe", params: { channel: "ticker", symbol: CFG.coins.map(c => c.ws) } })); };
   ws.onmessage = m => {
@@ -262,8 +294,7 @@ function connectWS() {
     if (j.channel !== "ticker" || !j.data) return;
     for (const d of j.data) {
       const c = CFG.coins.find(c => c.ws === d.symbol); if (!c) continue;
-      const prev = LIVE[c.name] && LIVE[c.name].last; LIVE[c.name] = { last: d.last, bid: d.bid, pct: d.change_pct };
-      priceTick(c.name, prev);
+      setLive(c.name, d.last, d.bid, d.change_pct);
     }
   };
   ws.onclose = ws.onerror = () => { wsOK = false; dirty = true; ws = null; setTimeout(connectWS, Math.min(30000, 2000 * ++wsTry)); };
@@ -278,7 +309,7 @@ function build() {
   <div class="banner" id="banner"><i class="dot"></i><div class="t">Loading…</div><div class="ago"></div></div>
   <div class="card bal">
     <div class="meta"><div>Start<b id="m-start">—</b></div><div>Risk<b id="m-risk">—</b></div><div>Max pos<b id="m-max">—</b></div><div>Daily stop<b id="m-stop">—</b></div></div>
-    <div class="tl">Total value<span>no currency conversion</span></div>
+    <div class="tl">Total value<span id="ov-src">no currency conversion</span></div>
     <div id="ov-cols"></div>
     <div class="state" id="bal-state"></div>
   </div>
@@ -343,7 +374,7 @@ function buildCoinChips() {
   const chip = c => `<div class="chip" id="ch-${c.name}"><div class="s">${c.name}<em></em></div><div class="p">—</div><div class="c dim">—</div></div>`;
   $("#chips").innerHTML = MULTI() ? WAL().map(w => `<div class="wh">${esc(w.id)} wallet · ${esc(w.currency)} pairs</div>${CFG.coins.filter(c => (c.wallet || WAL()[0].id) === w.id).map(chip).join("")}`).join("") : CFG.coins.map(chip).join("");
 }
-const walCols = pfx => `<div class="wcols">${WAL().map((w, i) => `${i ? '<span class="wplus">+</span>' : ""}<div class="wcol"><div class="wl">${esc(w.id)} wallet</div><div class="big"><span class="n" id="${pfx}-n-${w.id}">0.00</span><span class="cur">${esc(w.currency)}</span></div><div class="pl"><span id="${pfx}-p-${w.id}">+0.00</span></div></div>`).join("")}</div>`;
+const walCols = pfx => `<div class="wcols">${WAL().map((w, i) => `${i ? '<span class="wplus">+</span>' : ""}<div class="wcol"><div class="wl">${esc(w.id)} wallet</div><div class="big"><span class="n" id="${pfx}-n-${w.id}">0.00</span><span class="cur">${esc(w.currency)}</span></div><div class="pl"><span id="${pfx}-p-${w.id}">+0.00</span></div><div class="sb2" id="${pfx}-s-${w.id}"></div></div>`).join("")}</div>`;
 function ensureCols() {
   const key = WAL().map(w => w.id + w.currency).join("|");
   if (key === CFGKEY) return; CFGKEY = key;
@@ -363,16 +394,22 @@ const flash = el => { el.classList.remove("flash"); void el.offsetWidth; el.clas
 const isOpenView = t => !$("#v-" + t).hidden;
 
 /* wallet equity at the replay cursor = start + realised P&L of earlier nights + tonight's realised P&L up to the cursor + unrealised; in live mode at the end of the data the exact paper account is used */
-function posVal(p, live) { const px = live && LIVE[p.coin] ? LIVE[p.coin].bid || LIVE[p.coin].last : p.bid; return { px, val: px * p.vol, un: (px - p.entry) * p.vol }; }
+function posVal(p, live) { const lp = live ? livePx(p.coin) : null, px = lp ?? p.bid; return { px, val: px * p.vol, un: (px - p.entry) * p.vol, live: lp != null }; }
 function walletNow(id) {
-  const w = wOf(id), W = wst(S, id), P = (D && D.prior) || {}, st = D && D.state, atEnd = cur >= EV.length && mode === "live" && st;
-  const live = mode === "live" && cur >= EV.length, held = Object.values(S.pos).filter(p => p.w === id).map(p => ({ p, ...posVal(p, live) }));
-  const inPos = held.reduce((a, h) => a + h.val, 0), un = held.reduce((a, h) => a + h.un, 0);
-  const sw = atEnd && st.wallets && st.wallets[id], leg = atEnd && !st.wallets && id === WAL()[0].id && st.balance;
-  let eq = w.start_capital + ((P.pnl_w && P.pnl_w[id]) || 0) + W.pnl + un, cash = null;
-  if (sw && sw.equity != null) { eq = sw.equity; cash = sw.cash; } else if (leg && leg.equity != null) { eq = leg.equity; cash = leg.cash; }
-  if (cash == null || (live && held.length)) cash = eq - inPos;
-  return { id, w, W, eq, cash, inPos, held, start: w.start_capital, pl: eq - w.start_capital };
+  const w = wOf(id), W = wst(S, id), P = (D && D.prior) || {}, st = D && D.state, live = mode === "live" && cur >= EV.length;
+  const held = Object.values(S.pos).filter(p => p.w === id).map(p => ({ p, ...posVal(p, live) }));
+  const inPos = held.reduce((a, h) => a + h.val, 0), un = held.reduce((a, h) => a + h.un, 0), cost = held.reduce((a, h) => a + (h.p.cost != null ? h.p.cost : h.p.entry * h.p.vol), 0);
+  let cash = w.start_capital + ((P.pnl_w && P.pnl_w[id]) || 0) + W.pnl - cost;       // wallet cash = start + realised P&L (earlier nights + tonight up to the cursor) - money in open positions
+  const stp = st && st.positions ? st.positions.filter(x => (x.wallet || WAL()[0].id) === id).length : -1;
+  const sw = live && st && st.wallets && st.wallets[id], leg = live && st && !st.wallets && id === WAL()[0].id && st.balance;
+  if (sw && sw.cash != null && stp === held.length) cash = sw.cash; else if (leg && leg.cash != null && stp === held.length) cash = leg.cash;   // exact paper-account cash when the published state matches the events
+  const eq = cash + inPos;      // live equity = cash + live market value of the holdings
+  return { id, w, W, eq, cash, inPos, held, un, cost, start: w.start_capital, pl: eq - w.start_capital, nLive: held.filter(h => h.live).length };
+}
+function srcLabel(short) {
+  const live = mode === "live" && cur >= EV.length;
+  if (!live) return short ? (mode === "replay" ? "replay prices" : "paused prices") : (mode === "replay" ? "REPLAY" : "PAUSED") + " · prices from events" + (S && S.lastEv ? " at " + hms(S.lastEv.ts) + " ET" : "");
+  return DEMO ? (short ? "demo prices" : "DEMO · simulated prices") : feedOK() ? (short ? "● live prices" : "● LIVE · Kraken prices") : (short ? "event prices" : "feed offline · last event prices");
 }
 const equity = () => walletNow(WAL()[0].id).eq;
 function stateText() {
@@ -408,7 +445,10 @@ function render() {
   for (const x of WN) {
     countTo($("#ov-n-" + x.id), x.eq, 2, v => v.toLocaleString("en-CA", { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
     const plv = $("#ov-p-" + x.id); setT(plv, `${sg(x.pl)} (${sg(x.pl / x.start * 100, 1)}%)`); plv.className = plc(x.pl);
+    setT($("#ov-s-" + x.id), `cash ${money(x.cash)} · held ${money(x.inPos)}`);
+    const nn = $("#ov-n-" + x.id); if (nn._eq != null && Math.abs(nn._eq - x.eq) > 0.0004) { nn.classList.remove("up", "dn"); void nn.offsetWidth; nn.classList.add(x.eq > nn._eq ? "up" : "dn"); } nn._eq = x.eq;
   }
+  setT($("#ov-src"), srcLabel(true) + " · no conversion");
   const [stx, stc] = stateText(); setH($("#bal-state"), `<i style="background:${stc}"></i>${esc(stx)}`);
   countTo($("#s-scan"), S.scanned); countTo($("#s-pass"), S.passed); countTo($("#s-trades"), S.buys); setT($("#s-wl"), `${S.wins}-${S.losses}`);
   const e = S.lastEv, ban = $("#banner");
@@ -427,8 +467,8 @@ function render() {
     const mv = ci.move != null ? ci.move : lv ? lv.pct : null;
     const cc = el.querySelector(".c"); setT(cc, mv == null ? "—" : `${sg(mv, 1)}% 24h${ci.vol != null ? " · vol " + ci.vol.toFixed(1) + "×" : ""}`); cc.style.color = mv == null ? "" : mv >= 0 ? "var(--green)" : "var(--red)";
   }
-  setT($("#wsstat"), wsOK ? "● Kraken live" : "○ prices offline");
-  $("#wsstat").style.color = wsOK ? "var(--green)" : "var(--tx2)";
+  setT($("#wsstat"), DEMO ? "◌ simulated prices" : feedOK() ? "● Kraken live" : "○ prices offline");
+  $("#wsstat").style.color = feedOK() && !DEMO ? "var(--green)" : "var(--tx2)";
   setT($("#foot"), `${Q.get("data") ? "DEMO DATA (synthetic, not a real night) · " : ""}Night ${D ? D.night : "—"} · PAPER money only, no real orders · ${D ? "updated " + fD.format(new Date(D.generated_at * 1000)) + " ET" : ""}`);
   // agents
   for (const sc of document.querySelectorAll(".scr")) { if (+sc.max !== EV.length) sc.max = EV.length; if (document.activeElement !== sc || mode !== "pause") sc.value = cur; }
@@ -582,7 +622,7 @@ function renderAgentDetails() {
     h += split([[T.wins, "var(--green)"], [T.losses, "var(--red)"]], [[`${T.wins} win${T.wins == 1 ? "" : "s"}`, "var(--green)"], [`${T.losses} loss${T.losses == 1 ? "" : "es"}`, "var(--red)"]]);
     h += sec("Stop moves tonight") + rows([["Trailing stop raised", S.trail], ["Break-even lock armed", S.be]], Math.max(1, S.trail, S.be), "var(--yellow)", true);
     const ex = Object.entries(S.exitWhy); h += sec("Exits tonight") + (ex.length ? rows(ex.map(([k, n]) => [EXITL[k] || label(k), n]), Math.max(1, ...ex.map(x => x[1])), "var(--yellow)") : '<div class="rr z"><span>none yet</span></div>');
-    if (open.length) h += sec("Open positions") + open.map(p => { const px = liveEnd && LIVE[p.coin] ? LIVE[p.coin].bid || LIVE[p.coin].last : p.bid, pc = (px / p.entry - 1) * 100, sd = (px / p.stop - 1) * 100;
+    if (open.length) h += sec("Open positions") + open.map(p => { const px = posVal(p, liveEnd).px, pc = (px / p.entry - 1) * 100, sd = (px / p.stop - 1) * 100;
       return `<div class="rr"><span><b class="w">${esc(p.coin)}</b> <em>${M ? esc(p.w) + " · " : ""}${esc(p.kind)} stop ${fmtP(p.stop)} · ${sd.toFixed(1)}% away</em></span><b class="${pc >= 0 ? "g" : "r"}">${sg(pc)}%</b></div>`; }).join("");
     h += lastLine("posmgr") + sec("Activity", "last 6h") + spark("posmgr", "var(--yellow)");
     setH($("#det-posmgr"), h); }
@@ -620,7 +660,7 @@ function priceTick(name, prev) {
   const el = $("#ch-" + name); if (!el) return; const p = el.querySelector(".p"), lv = LIVE[name];
   setT(p, fmtP(lv.last));
   if (prev != null && prev !== lv.last) { el.classList.remove("up", "dn"); void el.offsetWidth; el.classList.add(lv.last > prev ? "up" : "dn"); }
-  if (S && isOpenView("wallet")) dirty = true;
+  if (S && (isOpenView("wallet") || isOpenView("overview")) && isHeld(name)) pxDirty = true;
 }
 function renderFunnel() {
   if (!isOpenView("activity")) return;
@@ -672,20 +712,27 @@ function priorTx(id) {   // closed trades of earlier nights (publisher's trades_
   return PT.w[id] = out.sort((a, b) => b.ts - a.ts);
 }
 const txRow = (t, ccy) => `<div class="txr"><span class="sd ${t.side}">${t.side === "buy" ? "BUY" : "SELL"}</span><div class="tb"><b>${esc(t.coin)}</b><em>${qty(t.vol)} @ ${fmtP(t.price)}</em></div><div class="ta"><b>${t.amt == null ? "—" : money(t.amt)} ${esc(ccy)}</b>${t.pnl != null ? `<em class="${plc(t.pnl)}">${sg(t.pnl)} (${sg(t.pct ?? 0, 1)}%)</em>` : `<em>${fTx.format(new Date(t.ts * 1000))}</em>`}</div>${t.pnl != null ? `<div class="tw">${fTx.format(new Date(t.ts * 1000))} ET · ${esc((t.why || "").replace(/_/g, " "))}</div>` : ""}</div>`;
+const HFL = {};   // previous values -> flash direction on change
+const fl = (key, v) => { const o = HFL[key]; HFL[key] = v; return o != null && Math.abs(o - v) > 0.0000001 ? (v > o ? " up" : " dn") : ""; };
 function renderWallet(WN) {
   if (!isOpenView("wallet")) return;
-  const live = mode === "live" && cur >= EV.length, M = MULTI();
-  const cols = `<div class="wcols">${WN.map((x, i) => `${i ? '<span class="wplus">+</span>' : ""}<div class="wcol"><div class="wl">${esc(x.id)} wallet</div><div class="big"><span class="n">${money(x.eq)}</span><span class="cur">${esc(x.w.currency)}</span></div><div class="pl ${plc(x.pl)}">${sg(x.pl)} (${sg(x.pl / x.start * 100, 1)}%)</div></div>`).join("")}</div>`;
-  let h = `<div class="card wtotal"><div class="tl">Total value<span>no currency conversion</span></div>${cols}<div class="wn">${WN.map(x => `${esc(x.id)} wallet trades ${esc(x.w.currency)} pairs`).join(" · ")}. Nothing is converted between wallets.</div></div>`;
-  if (!live && S.lastEv) h += `<div class="wnote">${mode === "replay" ? "Replay" : "Paused"} · wallets as of ${hms(S.lastEv.ts)} ET (event ${cur} / ${EV.length})</div>`;
+  const live = mode === "live" && cur >= EV.length, src = srcLabel(false), srcCol = live && !DEMO && feedOK() ? "var(--green)" : live && !DEMO ? "var(--orange)" : "var(--blue)";
+  const cols = `<div class="wcols">${WN.map((x, i) => `${i ? '<span class="wplus">+</span>' : ""}<div class="wcol"><div class="wl">${esc(x.id)} wallet</div><div class="big"><span class="n${fl("eq:" + x.id, x.eq)}">${money(x.eq)}</span><span class="cur">${esc(x.w.currency)}</span></div><div class="pl ${plc(x.pl)}">${sg(x.pl)} (${sg(x.pl / x.start * 100, 1)}%)</div><div class="sb2">cash ${money(x.cash)} · held ${money(x.inPos)}</div></div>`).join("")}</div>`;
+  let h = `<div class="card wtotal"><div class="tl">Total value<span style="color:${srcCol}">${esc(src)}</span></div>${cols}<div class="wn">Equity = cash + live value of holdings, per wallet. ${WN.map(x => `${esc(x.id)} wallet uses ${esc(x.w.currency)} pairs`).join(" · ")}. Nothing is converted between wallets.</div></div>`;
+  if (!live && S.lastEv) h += `<div class="wnote">${mode === "replay" ? "Replay" : "Paused"} · wallets valued at event prices as of ${hms(S.lastEv.ts)} ET (event ${cur} / ${EV.length})</div>`;
   for (const x of WN) {
     const C = x.w.currency, coins = CFG.coins.filter(c => (c.wallet || WAL()[0].id) === x.id).map(c => c.name);
-    const tx = [...x.W.tx, ...priorTx(x.id)], show = walShow[x.id] || 12;
+    const tx = [...x.W.tx, ...priorTx(x.id)], show = walShow[x.id] || 12, uPct = x.cost ? x.un / x.cost * 100 : 0;
     h += `<div class="h"><span>${esc(x.id)} Wallet</span><span class="mono wc">${esc(coins.join(" "))}</span></div><div class="card wcard">
-      <div class="wst"><div><i>Balance</i><b>${money(x.eq)}</b></div><div><i>Cash</i><b>${money(x.cash)}</b></div><div><i>In positions</i><b>${money(x.inPos)}</b></div><div><i>P&amp;L</i><b class="${plc(x.pl)}">${sg(x.pl)}</b></div></div>
-      <div class="wsub"><span>Started with ${x.start} ${esc(C)}</span><span>tonight ${sg(x.W.pnl)} ${esc(C)} · W-L ${x.W.wins}-${x.W.losses}</span></div>
-      <div class="sec"><span>Holdings</span><span>${x.held.length} open</span></div>`;
-    h += x.held.length ? x.held.map(({ p, px, val, un }) => `<div class="hd"><div class="tb"><b>${esc(p.coin)}</b><em>${qty(p.vol)} · in ${fmtP(p.entry)} · now ${fmtP(px)}</em></div><div class="ta"><b>${money(val)} ${esc(C)}</b><em class="${plc(un)}">${sg(un)} (${sg((px / p.entry - 1) * 100, 1)}%)</em></div><div class="tw">${esc(p.kind)} stop ${fmtP(p.stop)} · opened ${hms(p.ts)} ET</div></div>`).join("")
+      <div class="wst"><div><i>Equity${live ? " (live)" : ""}</i><b class="${fl("we:" + x.id, x.eq).trim()}">${money(x.eq)}</b></div><div><i>Cash</i><b>${money(x.cash)}</b></div><div><i>Holdings value</i><b class="${fl("wh:" + x.id, x.inPos).trim()}">${money(x.inPos)}</b></div><div><i>P&amp;L vs start</i><b class="${plc(x.pl)}">${sg(x.pl)}</b></div></div>
+      <div class="eqline">Cash ${money(x.cash)} + holdings ${money(x.inPos)} = <b>${money(x.eq)} ${esc(C)}</b></div>
+      <div class="wsub"><span>Started with ${x.start} ${esc(C)}</span><span>tonight realised ${sg(x.W.pnl)} ${esc(C)} · W-L ${x.W.wins}-${x.W.losses}</span></div>
+      <div class="sec"><span>Holdings · ${x.held.length} open</span><span class="${plc(x.un)}">unrealised ${sg(x.un)} ${esc(C)} (${sg(uPct, 1)}%)</span></div>`;
+    h += x.held.length ? x.held.map(({ p, px, val, un, live: lv }) => { const pc = (px / p.entry - 1) * 100, cs = p.cost != null ? p.cost : p.entry * p.vol, k = x.id + ":" + p.coin;
+      return `<div class="hold"><div class="hr"><b class="cn">${esc(p.coin)}</b><span class="src${lv ? " on" : ""}">${lv ? "LIVE" : live && !DEMO ? "LAST EVENT" : DEMO && live ? "DEMO" : "REPLAY"}</span><b class="mv${fl("hv:" + k, val)}">${money(val)} ${esc(C)}</b></div>
+      <div class="hr2"><span>Unrealised P&amp;L</span><b class="${plc(un)}${fl("hu:" + k, un)}">${sg(un)} ${esc(C)} (${sg(pc, 2)}%)</b></div>
+      <div class="g4"><div>Qty<b>${qty(p.vol)}</b></div><div>Avg entry<b>${fmtP(p.entry)}</b></div><div>${lv ? "Live price" : "Price"}<b class="${fl("hp:" + k, px).trim()}">${fmtP(px)}</b></div><div>Cost<b>${money(cs)}</b></div></div>
+      <div class="tw">${esc(p.kind)} stop ${fmtP(p.stop)} · opened ${hms(p.ts)} ET</div></div>`; }).join("")
       : `<div class="dim" style="font-size:12.5px;padding:2px 0 4px">No holdings — 100% cash (${money(x.cash)} ${esc(C)}).</div>`;
     h += `</div><div class="h"><span>${esc(x.id)} Transactions / Trades</span><span class="mono wc">${tx.length} fill${tx.length == 1 ? "" : "s"} · W-L ${x.W.wins}-${x.W.losses}</span></div><div class="card txl">`;
     h += tx.length ? tx.slice(0, show).map(t => txRow(t, C)).join("") + (tx.length > show ? `<button class="more" data-more="${esc(x.id)}">Show ${Math.min(20, tx.length - show)} more</button>` : "") : `<div class="empty"><b>No ${esc(x.id)} trades yet</b>${esc(stateText()[0])}</div>`;

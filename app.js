@@ -22,22 +22,37 @@ const fmtP = x => x == null || isNaN(x) ? "—" : x >= 100 ? x.toLocaleString("e
 const sg = (x, d = 2) => (x >= 0 ? "+" : "−") + Math.abs(x).toFixed(d);
 const ago = s => s < 5 ? "now" : s < 90 ? Math.round(s) + "s ago" : s < 5400 ? Math.round(s / 60) + "m ago" : (s / 3600).toFixed(1) + "h ago";
 const perf = () => performance.now();
+let CFGKEY = "";
 
-let D = null, CFG = { currency: "CAD", start_capital: 100, risk_pct: 10, max_positions: 2, daily_stop_pct: 5, coins: [] };
+let D = null, CFG = { currency: "CAD", start_capital: 100, risk_pct: 10, max_positions: 2, daily_stop_pct: 5, coins: [], wallets: [{ id: "CAD", currency: "CAD", start_capital: 100 }] };
 let EV = [], cur = 0, S = null, mode = "live", speed = 10, lastTick = perf(), dirty = true, lastFetchOK = 0, offline = false;
 const LIVE = {};   // WS prices: coin -> {last, pct}
 let wsOK = false;
 
+/* ---------- wallets: a CAD wallet and a USD wallet, never converted into each other ---------- */
+const WAL = () => CFG.wallets && CFG.wallets.length ? CFG.wallets : [{ id: CFG.currency, currency: CFG.currency, start_capital: CFG.start_capital }];
+const wOf = id => WAL().find(w => w.id === id) || WAL()[0];
+const MULTI = () => WAL().length > 1;
+const ccyOf = id => wOf(id).currency;
+const mPnl = v => v.pnl ?? v.pnl_cad, mCost = v => v.cost ?? v.cost_cad, mSize = v => v.size ?? v.size_cad;   // generic money fields, legacy *_cad fallback (CAD events of older nights)
+const money = (x, c) => (x == null || isNaN(x) ? "—" : x.toLocaleString("en-CA", { minimumFractionDigits: 2, maximumFractionDigits: 2 })) + (c ? " " + c : "");
+const smoney = (x, c, d = 2) => sg(x, d) + (c ? " " + c : "");
+const plc = x => x > 0.0005 ? "g" : x < -0.0005 ? "r" : "dim";
+
 /* ---------- humanising events ---------- */
 const coinOf = e => { const i = e.item || ""; if (i.startsWith("pos-")) return ""; return i.split(":")[0]; };
-const posCoin = pair => { const c = CFG.coins.find(c => c.pair === pair); return c ? c.name : (pair || "").replace(/CAD$/, ""); };
+const posCoin = pair => { const c = CFG.coins.find(c => c.pair === pair); return c ? c.name : (pair || "").replace(/(CAD|USD)$/, ""); };
+const coinW = n => { const c = CFG.coins.find(c => c.name === n || c.pair === n); return c ? (c.wallet || WAL()[0].id) : null; };
+const evW = e => { const v = e.v || {}; if (v.wallet) return v.wallet; const c = coinOf(e); return (c && coinW(c)) || (v.coin && coinW(v.coin)) || (v.pair && coinW(v.pair)) || null; };
+const tg = n => MULTI() && n && coinW(n) ? `${n}·${ccyOf(coinW(n))}` : n;      // coin + wallet tag for the text lines
+const evC = e => ccyOf(evW(e) || WAL()[0].id);
 const LBL = { trend: "Trend (close > EMA20 > EMA50)", move_band: "24h move outside band", btc_filter: "BTC filter", cooldown: "Cooldown after a loss",
   "signal candle already traded": "Candle already traded", "no_signal: volume below 1.2x": "Volume below 1.2×", "no_signal: candle not green": "Candle not green",
   "daily loss halt": "Daily loss stop", "max open positions reached": "Max positions reached", "ranked below the free slots (weaker 24h move)": "Ranked below free slots",
   "order already pending/open for this pair": "Order already pending", chase: "Chased more than 3%" };
 const label = s => LBL[s] || (s.charAt(0).toUpperCase() + s.slice(1)).replace(/_/g, " ");
 function describe(e) {
-  const v = e.v || {}, c = coinOf(e);
+  const v = e.v || {}, c = tg(coinOf(e)), cc = evC(e), pc = tg(posCoin(v.pair));
   switch (e.stage + ":" + e.decision) {
     case "scout:btc_pass": return `BTC ${sg(v.btc_pct_vs_ema50 ?? 0, 2)}% vs 1h EMA50 · entries allowed`;
     case "scout:btc_block": return v.error ? "BTC data unavailable · entries blocked" : `BTC ${sg(v.btc_pct_vs_ema50 ?? 0, 2)}% vs 1h EMA50 · entries blocked`;
@@ -47,17 +62,17 @@ function describe(e) {
     case "scout:error": return `${c || "scan"} data error · will retry`;
     case "filter:pass": return `${c} passed every gate`;
     case "filter:reject": return `${c} rejected · ${e.reason.split(", ").map(label).join(", ")}`;
-    case "risk:approve": return `${c} approved · ${(v.size_cad ?? 0).toFixed(2)} ${CFG.currency}${v.slots_left != null ? " · " + v.slots_left + " slot" + (v.slots_left == 1 ? "" : "s") + " left" : ""}`;
+    case "risk:approve": return `${c} approved · ${(mSize(v) ?? 0).toFixed(2)} ${cc}${v.slots_left != null ? " · " + v.slots_left + " slot" + (v.slots_left == 1 ? "" : "s") + " left" : ""}`;
     case "risk:reject": return `${c} rejected · ${e.reason.split(", ").map(label).join(", ")}`;
     case "risk:defer": return `${c} deferred · ${e.reason}`;
-    case "risk:pause": return "Paused for the night · loss limit hit";
-    case "executor:filled": return v.pnl_cad != null ? `Sold ${posCoin(v.pair)} @ ${fmtP(v.price)} · ${sg(v.pnl_cad)} ${CFG.currency} (${(v.exit_reason || "").replace(/_/g, " ")})` : `Bought ${posCoin(v.pair)} @ ${fmtP(v.price)} · ${(v.cost_cad ?? 0).toFixed(2)} ${CFG.currency}`;
+    case "risk:pause": return `${MULTI() ? ccyOf(v.wallet || WAL()[0].id) + " wallet paused" : "Paused"} for the night · loss limit hit`;
+    case "executor:filled": return mPnl(v) != null ? `Sold ${pc} @ ${fmtP(v.price)} · ${sg(mPnl(v))} ${cc} (${(v.exit_reason || "").replace(/_/g, " ")})` : `Bought ${pc} @ ${fmtP(v.price)} · ${(mCost(v) ?? 0).toFixed(2)} ${cc}`;
     case "executor:dry_run": return e.reason;
     case "executor:reject": return `${c} ${e.reason}`;
     case "executor:error": return `Order error · ${e.reason}`;
-    case "posmgr:hold": return `Holding ${posCoin(v.pair)} · bid ${fmtP(v.bid)} · stop ${fmtP(v.stop)} (${v.stop_kind})`;
-    case "posmgr:stop_raised": return `${posCoin(v.pair)} stop raised → ${fmtP(v.stop)} (${v.stop_kind})`;
-    case "posmgr:exit_signal": return `Exit ${posCoin(v.pair)} · ${e.reason}`;
+    case "posmgr:hold": return `Holding ${pc} · bid ${fmtP(v.bid)} · stop ${fmtP(v.stop)} (${v.stop_kind})`;
+    case "posmgr:stop_raised": return `${pc} stop raised → ${fmtP(v.stop)} (${v.stop_kind})`;
+    case "posmgr:exit_signal": return `Exit ${pc} · ${e.reason}`;
     case "posmgr:recovered": return "Recovered a stuck closing position";
     case "posmgr:error": return e.reason;
   }
@@ -70,8 +85,9 @@ function newState() {
   return { n: 0, scanned: 0, cands: 0, nosig: 0, passed: 0, approved: 0, buys: 0, wins: 0, losses: 0, pnl: 0, btcPass: 0, btcBlock: 0, rej: { filter: {}, risk: {} },
     at: {}, last: {}, lastEv: null, pos: {}, closed: [], coin: {}, log: [], btc: null, paused: false, halted: false, errors: 0,
     chk: 0, held: 0, ns: { trend: 0, vol: 0, red: 0 }, nsF: 0, scanTs: [], lastCoin: null, fRej: 0, rin: 0, rRej: 0, rDef: 0, sent: 0, sentSell: 0, failed: 0, holds: 0, stops: 0, be: 0, trail: 0,
-    exitWhy: {}, streak: 0, lastSize: null, err: {}, starts: {}, spark: {}, lastFill: null };
+    exitWhy: {}, lastSize: null, err: {}, starts: {}, spark: {}, lastFill: null, W: {} };
 }
+function wst(s, id) { return s.W[id] || (s.W[id] = { pnl: 0, wins: 0, losses: 0, buys: 0, sells: 0, streak: 0, paused: false, halted: false, lastSize: null, closed: [], tx: [], chk: 0, cands: 0, passed: 0, fRej: 0, approved: 0, rRej: 0, sent: 0 }); }
 function apply(s, e, fx) {
   const v = e.v || {}; s.n++;
   if (fx) s.at[e.stage] = perf();
@@ -84,27 +100,32 @@ function apply(s, e, fx) {
   if (k === "scout:btc_pass" || k === "scout:btc_block") { s.btc = { ok: k === "scout:btc_pass", pct: v.btc_pct_vs_ema50, ts: e.ts }; s[k === "scout:btc_pass" ? "btcPass" : "btcBlock"]++; s.scanTs.push(e.ts); if (s.scanTs.length > 24) s.scanTs.shift(); }
   else if (k === "scout:no_signal" || k === "scout:candidate") {
     s.scanned++; if (k === "scout:candidate") s.cands++; else s.nosig++;
+    { const W = wst(s, evW(e) || WAL()[0].id); W.chk++; if (k === "scout:candidate") W.cands++; }
     s.coin[v.coin] = { move: v.move24h_pct, vol: v.vol_ratio, cand: k === "scout:candidate", ts: e.ts, gap: k === "scout:candidate" ? 0 : v.gap_pct };
     s.chk++; s.lastCoin = { coin: v.coin, move: v.move24h_pct, vol: v.vol_ratio, gap: k === "scout:candidate" ? 0 : v.gap_pct, cand: k === "scout:candidate", ts: e.ts };
     if (k === "scout:no_signal" && v.trend_ok != null) { s.nsF++; if (!v.trend_ok) s.ns.trend++; if (!v.volume_ok) s.ns.vol++; if (!v.green) s.ns.red++; }
   } else if (k === "scout:skip") { s.scanned++; s.held++; const c = s.coin[e.item] = s.coin[e.item] || {}; c.held = true; }
   else if (k === "scout:error" || k === "executor:error" || k === "posmgr:error") { s.errors++; if (k === "executor:error") s.failed++; }
-  else if (k === "filter:pass") s.passed++;
-  else if (e.stage === "filter" && e.decision === "reject") { s.fRej++; for (const r of e.reason.split(", ")) s.rej.filter[r] = (s.rej.filter[r] || 0) + 1; }
-  else if (k === "risk:approve") { s.approved++; s.rin++; s.sent++; s.lastSize = v.size_cad; }
+  else if (k === "filter:pass") { s.passed++; wst(s, evW(e) || WAL()[0].id).passed++; }
+  else if (e.stage === "filter" && e.decision === "reject") { s.fRej++; wst(s, evW(e) || WAL()[0].id).fRej++; for (const r of e.reason.split(", ")) s.rej.filter[r] = (s.rej.filter[r] || 0) + 1; }
+  else if (k === "risk:approve") { s.approved++; s.rin++; s.sent++; s.lastSize = mSize(v); const W = wst(s, evW(e) || WAL()[0].id); W.approved++; W.lastSize = mSize(v); }
   else if (k === "risk:defer") { s.rin++; s.rDef++; }
-  else if (e.stage === "risk" && e.decision === "reject") { s.rin++; s.rRej++; for (const r of e.reason.split(", ")) s.rej.risk[r] = (s.rej.risk[r] || 0) + 1; if (e.reason === "daily loss halt") s.halted = true; }
-  else if (k === "risk:pause") s.paused = true;
+  else if (e.stage === "risk" && e.decision === "reject") { s.rin++; s.rRej++; const W = wst(s, evW(e) || WAL()[0].id); W.rRej++; for (const r of e.reason.split(", ")) s.rej.risk[r] = (s.rej.risk[r] || 0) + 1; if (e.reason === "daily loss halt") W.halted = true; }
+  else if (k === "risk:pause") wst(s, v.wallet || evW(e) || WAL()[0].id).paused = true;
   else if (k === "executor:filled") {
-    if (v.pnl_cad == null) {
-      s.buys++; s.pos[v.pos_id] = { id: v.pos_id, pair: v.pair, coin: posCoin(v.pair), entry: v.price, vol: v.volume, cost: v.cost_cad, stop: v.stop, kind: "initial", peak: v.price, bid: v.price, ts: e.ts };
-      (s.coin[posCoin(v.pair)] = s.coin[posCoin(v.pair)] || {}).held = true;
+    const w = evW(e) || WAL()[0].id, W = wst(s, w), pn = mPnl(v), coin = posCoin(v.pair);
+    if (pn == null) {
+      s.buys++; W.buys++; const cost = mCost(v);
+      s.pos[v.pos_id] = { id: v.pos_id, pair: v.pair, coin, w, entry: v.price, vol: v.volume, cost, stop: v.stop, kind: "initial", peak: v.price, bid: v.price, ts: e.ts };
+      (s.coin[coin] = s.coin[coin] || {}).held = true;
+      W.tx.unshift({ ts: e.ts, side: "buy", coin, pair: v.pair, price: v.price, vol: v.volume, amt: cost });
     } else {
-      const p = s.pos[v.pos_id] || { id: v.pos_id, pair: v.pair, coin: posCoin(v.pair), entry: null, cost: null, ts: null };
+      const p = s.pos[v.pos_id] || { id: v.pos_id, pair: v.pair, coin, w, entry: null, cost: null, vol: v.volume, ts: null };
       delete s.pos[v.pos_id]; if (s.coin[p.coin]) s.coin[p.coin].held = false;
-      s.pnl += v.pnl_cad; v.pnl_cad >= 0 ? s.wins++ : s.losses++; s.streak = v.pnl_cad >= 0 ? 0 : s.streak + 1;
+      W.pnl += pn; W.sells++; pn >= 0 ? (s.wins++, W.wins++) : (s.losses++, W.losses++); W.streak = pn >= 0 ? 0 : W.streak + 1;
       const xr = (v.exit_reason || "exit"); s.exitWhy[xr] = (s.exitWhy[xr] || 0) + 1;
-      s.closed.unshift({ ...p, exit: v.price, pnl: v.pnl_cad, pct: v.pnl_pct, why: v.exit_reason, tc: e.ts });
+      const cl = { ...p, exit: v.price, pnl: pn, pct: v.pnl_pct, why: v.exit_reason, tc: e.ts }; s.closed.unshift(cl); W.closed.unshift(cl);
+      W.tx.unshift({ ts: e.ts, side: "sell", coin: p.coin, pair: v.pair, price: v.price, vol: v.volume ?? p.vol, amt: v.proceeds ?? (p.cost != null ? p.cost + pn : null), pnl: pn, pct: v.pnl_pct, why: v.exit_reason });
     }
     s.lastFill = e;
   } else if (k === "executor:reject") s.failed++;
@@ -257,15 +278,15 @@ function build() {
   <div class="banner" id="banner"><i class="dot"></i><div class="t">Loading…</div><div class="ago"></div></div>
   <div class="card bal">
     <div class="meta"><div>Start<b id="m-start">—</b></div><div>Risk<b id="m-risk">—</b></div><div>Max pos<b id="m-max">—</b></div><div>Daily stop<b id="m-stop">—</b></div></div>
-    <div class="big"><span class="n" id="bal-n">0.00</span><span class="cur" id="bal-c">CAD</span></div>
-    <div class="pl"><span id="pl-v">+0.00</span><span class="badge" id="pl-b">1.00×</span></div>
+    <div class="tl">Total value<span>no currency conversion</span></div>
+    <div id="ov-cols"></div>
     <div class="state" id="bal-state"></div>
   </div>
   <div class="stats">
     <div><div class="v" id="s-scan">0</div><div class="l">SCANNED</div></div><div><div class="v" id="s-pass">0</div><div class="l">PASSED</div></div>
     <div><div class="v" id="s-trades">0</div><div class="l">TRADES</div></div><div><div class="v" id="s-wl">0-0</div><div class="l">W-L</div></div>
   </div>
-  <div class="h"><span>Coins</span><span class="mono" id="wsstat" style="letter-spacing:0;text-transform:none"></span></div>
+  <div class="h" style="margin-top:14px"><span>Coins</span><span class="mono" id="wsstat" style="letter-spacing:0;text-transform:none"></span></div>
   <div class="chips" id="chips"></div>
   <div class="foot" id="foot"></div>`;
   $("#v-agents").innerHTML = `
@@ -287,7 +308,7 @@ function build() {
   <div class="logbox"><div class="lh"><span>logger.tail <em id="log-n"></em></span><span id="log-st">● live</span></div><div class="log" id="log"></div><button id="log-more" hidden></button></div>
   <div class="h"><span>Funnel</span><span class="mono" id="fun-n" style="letter-spacing:0;text-transform:none"></span></div>
   <div class="card fun" id="fun"></div>`;
-  $("#v-trades").innerHTML = `<div id="tr-sum" class="h"></div><div id="tr-open"></div><div class="h" id="tr-ch"><span>Closed</span></div><div id="tr-closed"></div>`;
+  $("#v-wallet").onclick = e => { const b = e.target.closest("[data-more]"); if (b) { walShow[b.dataset.more] = (walShow[b.dataset.more] || 12) + 20; dirty = true; } };
   for (const b of document.querySelectorAll(".seg button")) b.onclick = () => setMode(b.dataset.m);
   for (const h of document.querySelectorAll(".agent")) h.onclick = e => { if (e.target.closest(".det") || COMPACT) return; h.classList.toggle("fold"); };
   $("#cmp").onclick = () => setCompact(!COMPACT);
@@ -319,7 +340,14 @@ function tab(t) {
   window.scrollTo(0, 0); dirty = true;
 }
 function buildCoinChips() {
-  $("#chips").innerHTML = CFG.coins.map(c => `<div class="chip" id="ch-${c.name}"><div class="s">${c.name}<em></em></div><div class="p">—</div><div class="c dim">—</div></div>`).join("");
+  const chip = c => `<div class="chip" id="ch-${c.name}"><div class="s">${c.name}<em></em></div><div class="p">—</div><div class="c dim">—</div></div>`;
+  $("#chips").innerHTML = MULTI() ? WAL().map(w => `<div class="wh">${esc(w.id)} wallet · ${esc(w.currency)} pairs</div>${CFG.coins.filter(c => (c.wallet || WAL()[0].id) === w.id).map(chip).join("")}`).join("") : CFG.coins.map(chip).join("");
+}
+const walCols = pfx => `<div class="wcols">${WAL().map((w, i) => `${i ? '<span class="wplus">+</span>' : ""}<div class="wcol"><div class="wl">${esc(w.id)} wallet</div><div class="big"><span class="n" id="${pfx}-n-${w.id}">0.00</span><span class="cur">${esc(w.currency)}</span></div><div class="pl"><span id="${pfx}-p-${w.id}">+0.00</span></div></div>`).join("")}</div>`;
+function ensureCols() {
+  const key = WAL().map(w => w.id + w.currency).join("|");
+  if (key === CFGKEY) return; CFGKEY = key;
+  $("#ov-cols").innerHTML = walCols("ov"); for (const el of document.querySelectorAll("#ov-cols .n")) { el._v = null; el._t = null; }
 }
 /* count-up numbers */
 function countTo(el, n, dec = 0, fmt) {
@@ -334,21 +362,29 @@ const setH = (el, h) => { if (el && el._x !== h) { el._x = h; el.innerHTML = h; 
 const flash = el => { el.classList.remove("flash"); void el.offsetWidth; el.classList.add("flash"); };
 const isOpenView = t => !$("#v-" + t).hidden;
 
-function equity() {
-  const start = CFG.start_capital;
-  const atEnd = cur >= EV.length && mode === "live" && D && D.state && D.state.balance && D.state.balance.equity != null;
-  if (atEnd) return D.state.balance.equity;
-  let un = 0; for (const p of Object.values(S.pos)) un += (p.bid - p.entry) * p.vol;
-  return start + S.pnl + un;
+/* wallet equity at the replay cursor = start + realised P&L of earlier nights + tonight's realised P&L up to the cursor + unrealised; in live mode at the end of the data the exact paper account is used */
+function posVal(p, live) { const px = live && LIVE[p.coin] ? LIVE[p.coin].bid || LIVE[p.coin].last : p.bid; return { px, val: px * p.vol, un: (px - p.entry) * p.vol }; }
+function walletNow(id) {
+  const w = wOf(id), W = wst(S, id), P = (D && D.prior) || {}, st = D && D.state, atEnd = cur >= EV.length && mode === "live" && st;
+  const live = mode === "live" && cur >= EV.length, held = Object.values(S.pos).filter(p => p.w === id).map(p => ({ p, ...posVal(p, live) }));
+  const inPos = held.reduce((a, h) => a + h.val, 0), un = held.reduce((a, h) => a + h.un, 0);
+  const sw = atEnd && st.wallets && st.wallets[id], leg = atEnd && !st.wallets && id === WAL()[0].id && st.balance;
+  let eq = w.start_capital + ((P.pnl_w && P.pnl_w[id]) || 0) + W.pnl + un, cash = null;
+  if (sw && sw.equity != null) { eq = sw.equity; cash = sw.cash; } else if (leg && leg.equity != null) { eq = leg.equity; cash = leg.cash; }
+  if (cash == null || (live && held.length)) cash = eq - inPos;
+  return { id, w, W, eq, cash, inPos, held, start: w.start_capital, pl: eq - w.start_capital };
 }
+const equity = () => walletNow(WAL()[0].id).eq;
 function stateText() {
-  const n = Object.keys(S.pos).length;
+  const n = Object.keys(S.pos).length, M = MULTI(), wn = w => M ? ` ${w.id} wallet` : "", parts = [];
   let t, col = "var(--tx2)";
-  if (S.halted) { t = `Daily loss stop (${CFG.daily_stop_pct}%) hit — no new entries tonight.`; col = "var(--red)"; }
-  else if (S.paused) { t = "Paused after consecutive losses — managing exits only."; col = "var(--orange)"; }
+  for (const w of WAL()) { const W = wst(S, w.id);
+    if (W.halted) parts.push([`${M ? w.id + " wallet: daily" : "Daily"} loss stop (${CFG.daily_stop_pct}%) hit — no new${wn(w) ? " " + w.id : ""} entries tonight.`, "var(--red)"]);
+    else if (W.paused) parts.push([`${M ? w.id + " wallet paused" : "Paused"} after consecutive losses — managing exits only.`, "var(--orange)"]); }
+  if (parts.length) { t = parts.map(x => x[0]).join(" "); col = parts[0][1]; }
   else if (n) { t = `Holding ${n} position${n > 1 ? "s" : ""} — trailing stops active, flat at ${String(CFG.close_hour || 8).padStart(2, "0")}:00 ET.`; col = "var(--green)"; }
   else if (S.btc && !S.btc.ok) { t = `Strict BTC filter is blocking entries — BTC is ${sg(S.btc.pct ?? 0, 2)}% vs its 1h EMA50. Scanning continues, no orders.`; col = "var(--red)"; }
-  else if (S.btc) { t = `BTC filter open — scanning ${CFG.coins.length} coins for breakouts, waiting for a signal that passes every gate.`; col = "var(--green)"; }
+  else if (S.btc) { t = `BTC filter open — scanning ${CFG.coins.length} coins${M ? " (" + WAL().map(w => CFG.coins.filter(c => (c.wallet || WAL()[0].id) === w.id).length + " " + w.currency).join(" + ") + ")" : ""} for breakouts, waiting for a signal that passes every gate.`; col = "var(--green)"; }
   else { t = "Waiting for the first scan…"; }
   return [t, col];
 }
@@ -366,11 +402,13 @@ function render() {
   else { txt = "LIVE"; }
   if (lp.className !== cls) lp.className = cls; setT(lp.lastElementChild, txt);
   // overview
-  const start = CFG.start_capital, eq = equity(), pl = eq - start;
-  setT($("#m-start"), start.toFixed(0)); setT($("#m-risk"), CFG.risk_pct + "%"); setT($("#m-max"), CFG.max_positions); setT($("#m-stop"), CFG.daily_stop_pct + "%");
-  countTo($("#bal-n"), eq, 2, x => x.toLocaleString("en-CA", { minimumFractionDigits: 2, maximumFractionDigits: 2 })); setT($("#bal-c"), CFG.currency);
-  const plv = $("#pl-v"); setT(plv, `${sg(pl)} ${CFG.currency} (${sg(pl / start * 100)}%)`); plv.className = pl > 0.0005 ? "g" : pl < -0.0005 ? "r" : "dim";
-  const pb = $("#pl-b"); setT(pb, (eq / start).toFixed(2) + "×"); pb.style.color = pl > 0.0005 ? "var(--green)" : pl < -0.0005 ? "var(--red)" : "var(--tx2)";
+  ensureCols();
+  const wl = WAL(), WN = wl.map(w => walletNow(w.id));
+  setT($("#m-start"), wl.map(w => w.start_capital).join(" + ")); setT($("#m-risk"), CFG.risk_pct + "%"); setT($("#m-max"), CFG.max_positions + (wl.length > 1 ? "/wallet" : "")); setT($("#m-stop"), CFG.daily_stop_pct + "%");
+  for (const x of WN) {
+    countTo($("#ov-n-" + x.id), x.eq, 2, v => v.toLocaleString("en-CA", { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
+    const plv = $("#ov-p-" + x.id); setT(plv, `${sg(x.pl)} (${sg(x.pl / x.start * 100, 1)}%)`); plv.className = plc(x.pl);
+  }
   const [stx, stc] = stateText(); setH($("#bal-state"), `<i style="background:${stc}"></i>${esc(stx)}`);
   countTo($("#s-scan"), S.scanned); countTo($("#s-pass"), S.passed); countTo($("#s-trades"), S.buys); setT($("#s-wl"), `${S.wins}-${S.losses}`);
   const e = S.lastEv, ban = $("#banner");
@@ -408,7 +446,7 @@ function render() {
     const stopped = ev && ev.item === "sys" && ev.decision === "stop";
     setT(el.querySelector(".pillo"), stopped ? "STOPPED" : act ? s.act : !ev ? "WAITING" : s.k === "posmgr" ? (nopen ? "WATCHING " + nopen : "FLAT") : "IDLE");
   }
-  renderStrip(nopen, now); renderAgentDetails(); renderFunnel(); renderLog(); renderTrades();
+  renderStrip(nopen, now); renderAgentDetails(); renderFunnel(); renderLog(); renderWallet(WN);
 }
 
 /* ---------- agent cards: counters, reason bars, sparklines (all derived from the events up to the replay cursor) ---------- */
@@ -428,7 +466,7 @@ function totals() {
   const sl = supList().filter(x => x[2] === "restart");
   return { scans: S.btcPass + S.btcBlock, btc_block: S.btcBlock, checks: S.chk, held: S.held, cands: S.cands, f_in: S.passed + S.fRej, f_pass: S.passed, f_rej: S.fRej, f_reasons: S.rej.filter,
     r_in: S.rin, r_ok: S.approved, r_rej: S.rRej, r_reasons: S.rej.risk, sent: S.sent, filled_b: S.buys, filled_s: S.wins + S.losses, failed: S.failed, stops: S.stops, be: S.be, holds: S.holds,
-    wins: S.wins, losses: S.losses, pnl: S.pnl, restarts: sl.length, errors: S.errors, _sup: sl };
+    wins: S.wins, losses: S.losses, pnl_w: Object.fromEntries(WAL().map(w => [w.id, wst(S, w.id).pnl])), restarts: sl.length, errors: S.errors, _sup: sl };
 }
 function allOf(T) {
   const P = (D && D.prior) || {}, A = {};
@@ -466,18 +504,22 @@ function medInterval() {
 }
 function renderMini(T, nopen, age, lr) {
   const bar = p => { const t = p.reduce((a, x) => a + x[0], 0); return `<div class="sb">${t ? p.map(x => `<i style="width:${x[0] / t * 100}%;background:${x[1]}"></i>`).join("") : ""}</div>`; };
-  const m = (k, a, b) => setH($("#mini-" + k), cells(a.map((x, i) => cell("m." + k + i, x[0], x[1], null, x[2]))) + bar(b));
+  const pnlCol = o => { const x = Object.values(o); return x.some(v => v > 0.0005) && !x.some(v => v < -0.0005) ? "var(--green)" : x.some(v => v < -0.0005) && !x.some(v => v > 0.0005) ? "var(--red)" : ""; };
+  const pnl2 = () => { const v = WAL().map(w => sg(T.pnl_w[w.id], 1) + " " + w.currency).join("|"), ch = PV["m.pnl"] !== undefined && PV["m.pnl"] !== v && mode !== "pause"; PV["m.pnl"] = v;
+    return `<div class="c${ch ? " bump" : ""}"><b class="two" style="color:${pnlCol(T.pnl_w)}">${WAL().map(w => `<s>${sg(T.pnl_w[w.id], MULTI() ? 1 : 2)}${MULTI() ? `<u>${esc(w.currency[0])}</u>` : ""}</s>`).join("")}</b><i>&nbsp;</i><span>P&amp;L${MULTI() ? " " + WAL().map(w => w.currency[0]).join("·") : ""}</span></div>`; };
+  const m = (k, a, b) => setH($("#mini-" + k), `<div class="cells">${a.map((x, i) => x[0] == null ? pnl2() : cell("m." + k + i, x[0], x[1], null, x[2])).join("")}</div>` + bar(b));
   const filled = T.filled_b + T.filled_s, pend = Math.max(0, T.sent - filled - T.failed), liveEnd = mode === "live" && cur >= EV.length;
   m("scout", [[nf(T.scans), "scans", "var(--blue)"], [nf(T.checks), "coins"], [nf(T.cands), "found", T.cands ? "var(--orange)" : ""]], [[T.cands, "var(--orange)"], [S.chk - S.cands, "#2d4b73"]]);
   m("filter", [[nf(T.f_in), "received", "var(--orange)"], [nf(T.f_pass), "accepted", T.f_pass ? "var(--green)" : ""], [nf(T.f_rej), "rejected", T.f_rej ? "var(--red)" : ""]], [[T.f_pass, "var(--green)"], [T.f_rej, "var(--red)"]]);
-  m("risk", [[nf(T.r_ok), "cleared", T.r_ok ? "var(--green)" : ""], [nf(T.r_rej), "blocked", T.r_rej ? "var(--red)" : ""], [`${nopen}/${CFG.max_positions}`, "slots"]], [[T.r_ok, "var(--green)"], [T.r_rej, "var(--red)"]]);
+  m("risk", [[nf(T.r_ok), "cleared", T.r_ok ? "var(--green)" : ""], [nf(T.r_rej), "blocked", T.r_rej ? "var(--red)" : ""], [MULTI() ? WAL().map(w => Object.values(S.pos).filter(p => p.w === w.id).length).join("·") + "/" + CFG.max_positions : `${nopen}/${CFG.max_positions}`, "slots"]], [[T.r_ok, "var(--green)"], [T.r_rej, "var(--red)"]]);
   m("executor", [[nf(filled), "filled", filled ? "var(--green)" : ""], [nf(T.failed), "failed", T.failed ? "var(--red)" : ""], [nf(pend), "pending"]], [[filled, "var(--green)"], [T.failed, "var(--red)"], [pend, "var(--yellow)"]]);
-  m("posmgr", [[nopen, "open", nopen ? "var(--green)" : ""], [`${T.wins}-${T.losses}`, "W-L"], [sg(T.pnl, 2), "P&L", T.pnl > 0.0005 ? "var(--green)" : T.pnl < -0.0005 ? "var(--red)" : ""]], [[T.wins, "var(--green)"], [T.losses, "var(--red)"]]);
+  m("posmgr", [[nopen, "open", nopen ? "var(--green)" : ""], [`${T.wins}-${T.losses}`, "W-L"], [null, "P&L", pnlCol(T.pnl_w)]], [[T.wins, "var(--green)"], [T.losses, "var(--red)"]]);
   m("sup", [[nf(T.restarts), "restarts", T.restarts ? "var(--orange)" : "var(--green)"], [liveEnd && age != null ? (age < 90 ? Math.round(age) + "s" : ago(age).replace(" ago", "")) : S.lastEv ? hms(S.lastEv.ts).slice(0, 5) : "—", liveEnd ? "beat" : "last ev."], [nf(T.errors), "errors", T.errors ? "var(--red)" : ""]], []);
 }
 function renderAgentDetails() {
   if (!isOpenView("agents")) return;
-  const T = totals(), A = allOf(T), R = CFG.rules || {}, C = CFG.currency, nopen = Object.keys(S.pos).length;
+  const T = totals(), A = allOf(T), R = CFG.rules || {}, nopen = Object.keys(S.pos).length, M = MULTI();
+  const byW = fn => M ? sec("By wallet") + kv(WAL().map(w => [w.id + " wallet", fn(w, wst(S, w.id))])) : "";
   const liveEnd = mode === "live" && cur >= EV.length;
   const stg = (D && D.state && D.state.stages) || {}, qs = (D && D.state && D.state.queues) || {};
   // ---- scout
@@ -491,6 +533,7 @@ function renderAgentDetails() {
     const cl = Object.entries(S.coin).filter(([c, x]) => x.gap != null && !x.held).sort((a, b) => a[1].gap - b[1].gap).slice(0, 3);
     if (cl.length) h += sec("Closest to a breakout") + `<div class="chp">${cl.map(([c, x]) => `<span><b>${esc(c)}</b> ${x.gap <= 0 ? "breaking out" : x.gap.toFixed(1) + "% below"}</span>`).join("")}</div>`;
     const lc = S.lastCoin; h += lc ? `<div class="last"><b>${hms(lc.ts)}</b> last checked <b class="w">${esc(lc.coin)}</b> · ${sg(lc.move ?? 0, 1)}% 24h · vol ${(lc.vol ?? 0).toFixed(2)}×${lc.gap != null && !lc.cand ? " · " + lc.gap.toFixed(1) + "% below 24h high" : ""}</div>` : '<div class="last dim">no coin checked yet</div>';
+    h += byW((w, W) => `${W.chk} checks · ${W.cands} found · ${CFG.coins.filter(c => (c.wallet || WAL()[0].id) === w.id).length} coins`);
     h += sec("Activity", "last 6h") + spark("scout", "var(--blue)");
     setH($("#det-scout"), h); }
   // ---- filter
@@ -502,22 +545,24 @@ function renderAgentDetails() {
     h += sec("Rejection reasons", "tonight / all-time") + rows(keys.map(k => [short(k), rej[k] || 0, A.f_reasons ? ar[k] || 0 : null]), Math.max(1, ...Object.values(rej)), "var(--orange)");
     if (!T.f_in) h += `<div class="note">No candidates have reached the filter tonight — ${S.chk ? `all ${nf(S.chk - S.cands)} coin checks stopped at Scout's breakout check` : "Scout hasn't found a breakout yet"}.</div>`;
     h += sec("BTC gate (checked every scan)") + (S.btc ? kv([["Gate", S.btc.ok ? "OPEN" : "CLOSED", S.btc.ok ? "var(--green)" : "var(--red)"], ["BTC vs 1h EMA50", sg(S.btc.pct ?? 0, 2) + "%", S.btc.ok ? "var(--green)" : "var(--red)"]]) : '<div class="dim" style="font-size:12px">waiting for the first scan</div>');
-    h += lastLine("filter") + sec("Activity", "last 6h") + spark("filter", "var(--orange)");
+    h += byW((w, W) => `${W.passed} accepted · ${W.fRej} rejected`) + lastLine("filter") + sec("Activity", "last 6h") + spark("filter", "var(--orange)");
     setH($("#det-filter"), h); }
   // ---- risk
   { const rej = S.rej.risk, ar = A.r_reasons || {}, ord = ["paused: consecutive-loss limit hit tonight", "daily loss halt", "chase", "max open positions reached", "ranked below the free slots (weaker 24h move)", "below_min_order", "order already pending/open for this pair"];
     const keys = [...ord, ...Object.keys(rej).filter(k => !ord.includes(k)), ...Object.keys(ar).filter(k => !ord.includes(k) && !(k in rej))];
-    const eq = equity(), maxp = CFG.max_positions, slotsUsed = nopen;
-    let h = cells([cell("rk.in", nf(T.r_in), "received", nf(A.r_in), "var(--red)"), cell("rk.ok", nf(T.r_ok), "approved", nf(A.r_ok), T.r_ok ? "var(--green)" : ""), cell("rk.rej", nf(T.r_rej), "blocked", nf(A.r_rej), T.r_rej ? "var(--red)" : ""), cell("rk.slot", `${slotsUsed}/${maxp}`, "slots used")]);
+    const maxp = CFG.max_positions, WN = WAL().map(w => walletNow(w.id)), slotsUsed = M ? WN.map(x => x.held.length).join("·") : nopen;
+    let h = cells([cell("rk.in", nf(T.r_in), "received", nf(A.r_in), "var(--red)"), cell("rk.ok", nf(T.r_ok), "approved", nf(A.r_ok), T.r_ok ? "var(--green)" : ""), cell("rk.rej", nf(T.r_rej), "blocked", nf(A.r_rej), T.r_rej ? "var(--red)" : ""), cell("rk.slot", `${slotsUsed}/${maxp}`, M ? "slots / wallet" : "slots used")]);
     h += split([[T.r_ok, "var(--green)"], [T.r_rej, "var(--red)"]], [[`${nf(T.r_ok)} approved`, "var(--green)"], [`${nf(T.r_rej)} blocked${S.rDef ? " · " + S.rDef + " deferred" : ""}`, "var(--red)"]]);
     h += sec("Block reasons", "tonight / all-time") + rows(keys.map(k => [k === "chase" ? `Chase cap (>${R.max_chase_pct ?? 3}%)` : short(k), rej[k] || 0, A.r_reasons ? ar[k] || 0 : null]), Math.max(1, ...Object.values(rej)), "var(--red)");
-    const stopC = CFG.start_capital * CFG.daily_stop_pct / 100, used = Math.max(0, -S.pnl), mc = R.max_consecutive_losses ?? 2;
-    h += sec("Limits & sizing now") + kv([
-      ["Entry size", `${CFG.risk_pct}% equity ≈ ${(eq * CFG.risk_pct / 100).toFixed(2)} ${C}`], ["Memes (DOGE, PEPE)", `${CFG.risk_pct_meme ?? 5}% ≈ ${(eq * (CFG.risk_pct_meme ?? 5) / 100).toFixed(2)} ${C}`],
-      ["Stop", `${R.atr_stop_mult ?? 2}×ATR · ${R.stop_min_pct ?? 2}–${R.stop_max_pct ?? 6}% (memes ${R.stop_max_pct_meme ?? 8}%)`], ["Trail / break-even", `${R.trail_atr_mult ?? 2.5}×ATR / +${R.breakeven_arm_atr ?? 1.5}×ATR`],
-      ["Loss streak", `${S.streak} / ${mc}${S.paused ? " · PAUSED" : ""}`, S.paused ? "var(--orange)" : ""], ["Day P&L vs stop", `${sg(S.pnl)} / −${stopC.toFixed(2)} ${C}${S.halted ? " · HALT" : ""}`, S.halted ? "var(--red)" : ""],
-      ["Last approved size", S.lastSize != null ? `${S.lastSize.toFixed(2)} ${C}` : "—"], ["Chase cap", `${R.max_chase_pct ?? 3}% above the signal close`]]);
-    h += split([[Math.min(used, stopC), used >= stopC ? "var(--red)" : "var(--orange)"], [Math.max(0, stopC - used), "#26262a"]], [[`daily stop used ${(Math.min(used, stopC) / stopC * 100).toFixed(0)}%`, ""]]);
+    const mc = R.max_consecutive_losses ?? 2, memeOf = id => CFG.coins.filter(c => c.meme && (c.wallet || WAL()[0].id) === id).map(c => c.name).join(", ");
+    const kvs = [["Stop", `${R.atr_stop_mult ?? 2}×ATR · ${R.stop_min_pct ?? 2}–${R.stop_max_pct ?? 6}% (memes ${R.stop_max_pct_meme ?? 8}%)`], ["Trail / break-even", `${R.trail_atr_mult ?? 2.5}×ATR / +${R.breakeven_arm_atr ?? 1.5}×ATR`], ["Chase cap", `${R.max_chase_pct ?? 3}% above the signal close`], ["Per wallet", M ? "slots, loss streak, daily stop" : "—"]];
+    h += sec("Limits & sizing now") + kv(kvs);
+    for (const x of WN) { const W = x.W, C = x.w.currency, stopC = x.start * CFG.daily_stop_pct / 100, used = Math.max(0, -W.pnl), pre = M ? x.id + " " : "";
+      h += (M ? sec(x.id + " wallet", C) : "") + kv([
+        [pre + "Entry size", `${CFG.risk_pct}% ≈ ${(x.eq * CFG.risk_pct / 100).toFixed(2)} ${C}`], [`Memes (${memeOf(x.id) || "none"})`, `${CFG.risk_pct_meme ?? 5}% ≈ ${(x.eq * (CFG.risk_pct_meme ?? 5) / 100).toFixed(2)} ${C}`],
+        [pre + "Loss streak", `${W.streak} / ${mc}${W.paused ? " · PAUSED" : ""}`, W.paused ? "var(--orange)" : ""], [pre + "Day P&L vs stop", `${sg(W.pnl)} / −${stopC.toFixed(2)} ${C}${W.halted ? " · HALT" : ""}`, W.halted ? "var(--red)" : ""],
+        [pre + "Slots used", `${x.held.length} / ${maxp}`], [pre + "Last approved", W.lastSize != null ? `${W.lastSize.toFixed(2)} ${C}` : "—"]]);
+      h += split([[Math.min(used, stopC), used >= stopC ? "var(--red)" : "var(--orange)"], [Math.max(0, stopC - used), "#26262a"]], [[`${M ? x.id + " " : ""}daily stop used ${(Math.min(used, stopC) / stopC * 100).toFixed(0)}%`, ""]]); }
     h += lastLine("risk") + sec("Activity", "last 6h") + spark("risk", "var(--red)");
     setH($("#det-risk"), h); }
   // ---- executor
@@ -526,18 +571,19 @@ function renderAgentDetails() {
     h += split([[filled, "var(--green)"], [T.failed, "var(--red)"], [pend, "var(--yellow)"]], [[`${nf(filled)} filled`, "var(--green)"], [`${nf(T.failed)} failed`, "var(--red)"], [`${nf(pend)} pending`, "var(--yellow)"]]);
     h += sec("Orders", "tonight / all-time") + rows([["Buys sent (approved by Risk)", T.r_ok, A.r_ok], ["Sells sent (exit signals)", S.sentSell, null], ["Buys filled", T.filled_b, A.filled_b], ["Sells filled", T.filled_s, A.filled_s], ["Rejected / errors", T.failed, A.failed]], Math.max(1, T.sent, T.filled_b), "var(--green)", true);
     h += kv([["Mode", "PAPER · simulated fills"], ["Queue now", liveEnd && qs.exec ? `${qs.exec.ready} ready · ${qs.exec.claimed} claimed` : liveEnd ? "—" : "live only"]]);
+    h += byW((w, W) => `${W.buys} buys · ${W.sells} sells`);
     h += fl ? `<div class="last"><b>${hms(fl.ts)}</b> ${esc(describe(fl))}</div>` : '<div class="last dim">no fills yet</div>';
     h += sec("Activity", "last 6h") + spark("executor", "var(--green)");
     setH($("#det-executor"), h); }
   // ---- position manager
   { const open = Object.values(S.pos);
     let h = cells([cell("pm.open", nopen, "open now", null, nopen ? "var(--green)" : ""), cell("pm.chk", nf(T.holds), "pos. checks", nf(A.holds)), cell("pm.stop", nf(T.stops), "stop moves", nf(A.stops), T.stops ? "var(--yellow)" : ""), cell("pm.wl", `${T.wins}-${T.losses}`, "wins–losses", `${A.wins}-${A.losses}`)]);
-    h += `<div class="pnl"><span>Closed P&L</span><b class="${T.pnl > 0.0005 ? "g" : T.pnl < -0.0005 ? "r" : "dim"}">${sg(T.pnl)} ${C}</b><em>all ${sg(A.pnl)} ${C}</em></div>`;
+    h += WAL().map(w => { const x = T.pnl_w[w.id], a = A.pnl_w ? A.pnl_w[w.id] || 0 : x; return `<div class="pnl"><span>Closed P&amp;L${M ? " · " + esc(w.id) : ""}</span><b class="${plc(x)}">${sg(x)} ${esc(w.currency)}</b><em>all ${sg(a)} ${esc(w.currency)}</em></div>`; }).join("");
     h += split([[T.wins, "var(--green)"], [T.losses, "var(--red)"]], [[`${T.wins} win${T.wins == 1 ? "" : "s"}`, "var(--green)"], [`${T.losses} loss${T.losses == 1 ? "" : "es"}`, "var(--red)"]]);
     h += sec("Stop moves tonight") + rows([["Trailing stop raised", S.trail], ["Break-even lock armed", S.be]], Math.max(1, S.trail, S.be), "var(--yellow)", true);
     const ex = Object.entries(S.exitWhy); h += sec("Exits tonight") + (ex.length ? rows(ex.map(([k, n]) => [EXITL[k] || label(k), n]), Math.max(1, ...ex.map(x => x[1])), "var(--yellow)") : '<div class="rr z"><span>none yet</span></div>');
     if (open.length) h += sec("Open positions") + open.map(p => { const px = liveEnd && LIVE[p.coin] ? LIVE[p.coin].bid || LIVE[p.coin].last : p.bid, pc = (px / p.entry - 1) * 100, sd = (px / p.stop - 1) * 100;
-      return `<div class="rr"><span><b class="w">${esc(p.coin)}</b> <em>${esc(p.kind)} stop ${fmtP(p.stop)} · ${sd.toFixed(1)}% away</em></span><b class="${pc >= 0 ? "g" : "r"}">${sg(pc)}%</b></div>`; }).join("");
+      return `<div class="rr"><span><b class="w">${esc(p.coin)}</b> <em>${M ? esc(p.w) + " · " : ""}${esc(p.kind)} stop ${fmtP(p.stop)} · ${sd.toFixed(1)}% away</em></span><b class="${pc >= 0 ? "g" : "r"}">${sg(pc)}%</b></div>`; }).join("");
     h += lastLine("posmgr") + sec("Activity", "last 6h") + spark("posmgr", "var(--yellow)");
     setH($("#det-posmgr"), h); }
   // ---- supervisor / publisher
@@ -574,7 +620,7 @@ function priceTick(name, prev) {
   const el = $("#ch-" + name); if (!el) return; const p = el.querySelector(".p"), lv = LIVE[name];
   setT(p, fmtP(lv.last));
   if (prev != null && prev !== lv.last) { el.classList.remove("up", "dn"); void el.offsetWidth; el.classList.add(lv.last > prev ? "up" : "dn"); }
-  if (S && isOpenView("trades")) dirty = true;
+  if (S && isOpenView("wallet")) dirty = true;
 }
 function renderFunnel() {
   if (!isOpenView("activity")) return;
@@ -608,27 +654,49 @@ function renderLog() {
   const mo = $("#log-more"); mo.hidden = all.length <= tail.length; if (!mo.hidden) setT(mo, `Show ${Math.min(300, all.length - tail.length)} earlier lines`);
   setT($("#log-st"), mode === "replay" ? "● replay " + speed + "x" : mode === "pause" ? "❚❚ paused" : "● live");
 }
-function renderTrades() {
-  if (!isOpenView("trades")) return;
-  const open = Object.values(S.pos), cl = S.closed, C = CFG.currency;
-  setH($("#tr-sum"), `<span>Open ${open.length} · Closed ${cl.length}</span><span class="mono" style="letter-spacing:0;text-transform:none">W-L ${S.wins}-${S.losses}</span>`);
-  const live = mode === "live" && cur >= EV.length;
-  const oh = open.map(p => {
-    const px = live && LIVE[p.coin] ? LIVE[p.coin].bid || LIVE[p.coin].last : p.bid, pl = (px - p.entry) * p.vol, pc = (px / p.entry - 1) * 100;
-    return `<div class="tr open"><div class="a"><b>${p.coin} <span class="dim" style="font-weight:500;font-size:12px">${p.pair}</span></b><span class="pl ${pl >= 0 ? "g" : "r"}">${sg(pl, 3)} ${C} · ${sg(pc)}%</span></div>
-    <div class="grid"><div>Entry<b>${fmtP(p.entry)}</b></div><div>Now<b>${fmtP(px)}</b></div><div>Stop (${esc(p.kind)})<b>${fmtP(p.stop)}</b></div><div>Size<b>${p.cost.toFixed(2)} ${C}</b></div><div>Peak<b>${fmtP(p.peak)}</b></div><div>Opened<b>${hms(p.ts)}</b></div></div></div>`;
-  }).join("");
-  const ch = cl.map(p => `<div class="tr"><div class="a"><b>${p.coin} <span class="dim" style="font-weight:500;font-size:12px">${p.pair}</span></b><span class="pl ${p.pnl >= 0 ? "g" : "r"}">${sg(p.pnl, 3)} ${C} · ${sg(p.pct ?? 0)}%</span></div>
-    <div class="grid"><div>Entry<b>${fmtP(p.entry)}</b></div><div>Exit<b>${fmtP(p.exit)}</b></div><div>Size<b>${p.cost != null ? p.cost.toFixed(2) + " " + C : "—"}</b></div></div>
-    <div class="why">${esc((p.why || "").replace(/_/g, " "))} · ${hms(p.tc)} ET</div></div>`).join("");
-  const empty = `<div class="empty"><svg viewBox="0 0 24 24"><path d="M3 17l5-6 4 3 5-8 4 4M3 21h18"/></svg><b>No trades yet</b>${esc(stateText()[0])}</div>`;
-  setH($("#tr-open"), oh || (cl.length ? '<div class="dim" style="padding:2px 4px 8px">No open positions.</div>' : empty));
-  $("#tr-ch").style.display = cl.length ? "" : "none"; setH($("#tr-closed"), ch);
+/* ---------- Wallet tab: total (no conversion) → CAD wallet → its transactions → USD wallet → its transactions ---------- */
+const walShow = {}, qty = x => x == null ? "—" : x >= 1000 ? Math.round(x).toLocaleString("en-CA") : x >= 1 ? String(+x.toFixed(4)) : x.toPrecision(3);
+const fTx = new Intl.DateTimeFormat("en-GB", { timeZone: TZ, day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit", hour12: false });
+let PT = { key: "", w: {} };
+function priorTx(id) {   // closed trades of earlier nights (publisher's trades_all), newest first
+  const key = D ? D.night + ":" + D.generated_at + ":" + ((D.trades_all || []).length) : "";
+  if (PT.key !== key) { PT = { key, w: {} }; }
+  if (PT.w[id]) return PT.w[id];
+  const out = [];
+  for (const t of (D && D.trades_all) || []) {
+    if ((t.wallet || WAL()[0].id) !== id || t.night === D.night) continue;
+    const te = Date.parse(t.entry_time) / 1000, tx = Date.parse(t.exit_time) / 1000;
+    if (t.entry_time) out.push({ ts: te, side: "buy", coin: t.coin, price: t.entry_price, vol: t.volume, amt: t.cost });
+    if (t.exit_time) out.push({ ts: tx, side: "sell", coin: t.coin, price: t.exit_price, vol: t.volume, amt: t.exit_price * t.volume, pnl: t.pnl, pct: t.pnl_pct, why: t.reason });
+  }
+  return PT.w[id] = out.sort((a, b) => b.ts - a.ts);
+}
+const txRow = (t, ccy) => `<div class="txr"><span class="sd ${t.side}">${t.side === "buy" ? "BUY" : "SELL"}</span><div class="tb"><b>${esc(t.coin)}</b><em>${qty(t.vol)} @ ${fmtP(t.price)}</em></div><div class="ta"><b>${t.amt == null ? "—" : money(t.amt)} ${esc(ccy)}</b>${t.pnl != null ? `<em class="${plc(t.pnl)}">${sg(t.pnl)} (${sg(t.pct ?? 0, 1)}%)</em>` : `<em>${fTx.format(new Date(t.ts * 1000))}</em>`}</div>${t.pnl != null ? `<div class="tw">${fTx.format(new Date(t.ts * 1000))} ET · ${esc((t.why || "").replace(/_/g, " "))}</div>` : ""}</div>`;
+function renderWallet(WN) {
+  if (!isOpenView("wallet")) return;
+  const live = mode === "live" && cur >= EV.length, M = MULTI();
+  const cols = `<div class="wcols">${WN.map((x, i) => `${i ? '<span class="wplus">+</span>' : ""}<div class="wcol"><div class="wl">${esc(x.id)} wallet</div><div class="big"><span class="n">${money(x.eq)}</span><span class="cur">${esc(x.w.currency)}</span></div><div class="pl ${plc(x.pl)}">${sg(x.pl)} (${sg(x.pl / x.start * 100, 1)}%)</div></div>`).join("")}</div>`;
+  let h = `<div class="card wtotal"><div class="tl">Total value<span>no currency conversion</span></div>${cols}<div class="wn">${WN.map(x => `${esc(x.id)} wallet trades ${esc(x.w.currency)} pairs`).join(" · ")}. Nothing is converted between wallets.</div></div>`;
+  if (!live && S.lastEv) h += `<div class="wnote">${mode === "replay" ? "Replay" : "Paused"} · wallets as of ${hms(S.lastEv.ts)} ET (event ${cur} / ${EV.length})</div>`;
+  for (const x of WN) {
+    const C = x.w.currency, coins = CFG.coins.filter(c => (c.wallet || WAL()[0].id) === x.id).map(c => c.name);
+    const tx = [...x.W.tx, ...priorTx(x.id)], show = walShow[x.id] || 12;
+    h += `<div class="h"><span>${esc(x.id)} Wallet</span><span class="mono wc">${esc(coins.join(" "))}</span></div><div class="card wcard">
+      <div class="wst"><div><i>Balance</i><b>${money(x.eq)}</b></div><div><i>Cash</i><b>${money(x.cash)}</b></div><div><i>In positions</i><b>${money(x.inPos)}</b></div><div><i>P&amp;L</i><b class="${plc(x.pl)}">${sg(x.pl)}</b></div></div>
+      <div class="wsub"><span>Started with ${x.start} ${esc(C)}</span><span>tonight ${sg(x.W.pnl)} ${esc(C)} · W-L ${x.W.wins}-${x.W.losses}</span></div>
+      <div class="sec"><span>Holdings</span><span>${x.held.length} open</span></div>`;
+    h += x.held.length ? x.held.map(({ p, px, val, un }) => `<div class="hd"><div class="tb"><b>${esc(p.coin)}</b><em>${qty(p.vol)} · in ${fmtP(p.entry)} · now ${fmtP(px)}</em></div><div class="ta"><b>${money(val)} ${esc(C)}</b><em class="${plc(un)}">${sg(un)} (${sg((px / p.entry - 1) * 100, 1)}%)</em></div><div class="tw">${esc(p.kind)} stop ${fmtP(p.stop)} · opened ${hms(p.ts)} ET</div></div>`).join("")
+      : `<div class="dim" style="font-size:12.5px;padding:2px 0 4px">No holdings — 100% cash (${money(x.cash)} ${esc(C)}).</div>`;
+    h += `</div><div class="h"><span>${esc(x.id)} Transactions / Trades</span><span class="mono wc">${tx.length} fill${tx.length == 1 ? "" : "s"} · W-L ${x.W.wins}-${x.W.losses}</span></div><div class="card txl">`;
+    h += tx.length ? tx.slice(0, show).map(t => txRow(t, C)).join("") + (tx.length > show ? `<button class="more" data-more="${esc(x.id)}">Show ${Math.min(20, tx.length - show)} more</button>` : "") : `<div class="empty"><b>No ${esc(x.id)} trades yet</b>${esc(stateText()[0])}</div>`;
+    h += `</div>`;
+  }
+  setH($("#v-wallet"), h);
 }
 
 /* ---------- boot ---------- */
 build();
-tab((location.hash || "#overview").slice(1).replace(/[^a-z]/g, "") && $("#v-" + location.hash.slice(1)) ? location.hash.slice(1) : "overview");
+tab((location.hash || "#overview").slice(1).replace(/[^a-z]/g, "") && $("#v-" + location.hash.slice(1)) ? location.hash.slice(1) : location.hash === "#trades" ? "wallet" : "overview");
 poll(true).then(() => { if (D) connectWS(); else setTimeout(() => poll(true).then(() => D && connectWS()), 8000); });
 setInterval(() => { if (!document.hidden) poll(false); }, POLL_MS);
 document.addEventListener("visibilitychange", () => { if (!document.hidden) poll(false); });

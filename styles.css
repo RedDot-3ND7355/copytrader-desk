@@ -103,8 +103,8 @@ main{padding:12px 14px}
 .logbox .lh{display:flex;justify-content:space-between;padding:9px 12px;border-bottom:1px solid var(--line);font-family:var(--mono);font-size:11.5px;color:var(--tx2)}
 .logbox .lh span:last-child{color:var(--green)}
 .log{font-family:var(--mono);font-size:10.8px;line-height:1.55;padding:8px 10px;max-height:52vh;min-height:140px;overflow-y:auto;white-space:pre-wrap;word-break:break-word}
-.log div{padding:1px 0 1px 17ch;text-indent:-17ch}
-.log .t{color:#5d5d62}.log .s{font-weight:700;display:inline-block;width:8ch;text-indent:0}
+.log div{padding:1px 0 1px 18ch;text-indent:-18ch}
+.log .t{color:#5d5d62}.log .s{font-weight:700;display:inline-block;width:9ch;text-indent:0}
 .log .new{animation:newline 1s ease-out}
 @keyframes newline{from{background:#1a1a1d}}
 /* trades */
@@ -212,3 +212,14 @@ main{padding:12px 14px}
 .strip .sc{min-width:0;padding:8px 1px 6px}
 .strip .sn{font-size:7.5px;letter-spacing:.1px;display:block;overflow:hidden;text-overflow:clip}
 .strip .sn i{position:absolute;top:4px;right:4px}
+
+/* step buttons, log footer */
+.scrub{gap:8px}
+.stp{flex:0 0 auto;width:30px;height:26px;border-radius:13px;background:var(--pill);color:#fff;display:flex;align-items:center;justify-content:center}
+.stp svg{width:11px;height:11px;fill:currentColor}
+.stp:disabled{opacity:.3}
+.stp:active:not(:disabled){background:#fff;color:#000}
+.logbox .lh em{font-style:normal;color:#5d5d62}
+#log-more{display:block;width:100%;padding:9px;border-top:1px solid var(--line);background:#000;color:var(--tx2);font:600 11.5px var(--mono);text-align:center}
+#log-more[hidden]{display:none}
+.log div.new .s{filter:brightness(1.4)}

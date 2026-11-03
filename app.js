@@ -747,4 +747,20 @@ tab((location.hash || "#overview").slice(1).replace(/[^a-z]/g, "") && $("#v-" + 
 poll(true).then(() => { if (D) connectWS(); else setTimeout(() => poll(true).then(() => D && connectWS()), 8000); });
 setInterval(() => { if (!document.hidden) poll(false); }, POLL_MS);
 document.addEventListener("visibilitychange", () => { if (!document.hidden) poll(false); });
-if ("serviceWorker" in navigator && location.protocol.startsWith("http") && !Q.get("nosw")) navigator.serviceWorker.register("sw.js").catch(() => {});
+const VER = "v10";
+if ("serviceWorker" in navigator && location.protocol.startsWith("http") && !Q.get("nosw")) {
+  const had = !!navigator.serviceWorker.controller;           // already controlled = this is an upgrade, not the first install
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    if (!had) return;
+    let last = 0; try { last = +sessionStorage.getItem("ct-reload") || 0; } catch (e) {}
+    if (Date.now() - last < 15000) return;                    // loop guard: at most one reload per 15 s
+    try { sessionStorage.setItem("ct-reload", Date.now()); } catch (e) {}
+    location.reload();
+  });
+  navigator.serviceWorker.register("sw.js", { updateViaCache: "none" }).then(reg => {
+    reg.update().catch(() => {});
+    document.addEventListener("visibilitychange", () => { if (!document.hidden) reg.update().catch(() => {}); });
+    setInterval(() => reg.update().catch(() => {}), 30 * 60 * 1000);
+  }).catch(() => {});
+}
+{ const v = document.getElementById("ver"); if (v) v.textContent = VER; }

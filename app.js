@@ -67,7 +67,9 @@ function describe(e) {
 /* ---------- reducer: night state at event cursor ---------- */
 function newState() {
   return { n: 0, scanned: 0, cands: 0, nosig: 0, passed: 0, approved: 0, buys: 0, wins: 0, losses: 0, pnl: 0, btcPass: 0, btcBlock: 0, rej: { filter: {}, risk: {} },
-    at: {}, last: {}, lastEv: null, pos: {}, closed: [], coin: {}, log: [], btc: null, paused: false, halted: false, errors: 0 };
+    at: {}, last: {}, lastEv: null, pos: {}, closed: [], coin: {}, log: [], btc: null, paused: false, halted: false, errors: 0,
+    chk: 0, held: 0, ns: { trend: 0, vol: 0, red: 0 }, nsF: 0, scanTs: [], lastCoin: null, fRej: 0, rin: 0, rRej: 0, rDef: 0, sent: 0, sentSell: 0, failed: 0, holds: 0, stops: 0, be: 0, trail: 0,
+    exitWhy: {}, streak: 0, lastSize: null, err: {}, starts: {}, spark: {}, lastFill: null };
 }
 function apply(s, e, fx) {
   const v = e.v || {}; s.n++;
@@ -75,16 +77,22 @@ function apply(s, e, fx) {
   if (e.item !== "sys" || !s.last[e.stage]) s.last[e.stage] = e; else if (e.decision === "stop") s.last[e.stage] = e;
   s.lastEv = e;
   const k = e.stage + ":" + e.decision;
-  if (k === "scout:btc_pass" || k === "scout:btc_block") { s.btc = { ok: k === "scout:btc_pass", pct: v.btc_pct_vs_ema50, ts: e.ts }; s[k === "scout:btc_pass" ? "btcPass" : "btcBlock"]++; }
+  if (e.item === "sys") { if (e.decision === "start") s.starts[e.stage] = (s.starts[e.stage] || 0) + 1; }
+  else { const sp = s.spark[e.stage] || (s.spark[e.stage] = {}), b = Math.floor(e.ts / 600); sp[b] = (sp[b] || 0) + 1; }
+  if (e.decision === "error") s.err[e.stage] = (s.err[e.stage] || 0) + 1;
+  if (k === "scout:btc_pass" || k === "scout:btc_block") { s.btc = { ok: k === "scout:btc_pass", pct: v.btc_pct_vs_ema50, ts: e.ts }; s[k === "scout:btc_pass" ? "btcPass" : "btcBlock"]++; s.scanTs.push(e.ts); if (s.scanTs.length > 24) s.scanTs.shift(); }
   else if (k === "scout:no_signal" || k === "scout:candidate") {
     s.scanned++; if (k === "scout:candidate") s.cands++; else s.nosig++;
-    s.coin[v.coin] = { move: v.move24h_pct, vol: v.vol_ratio, cand: k === "scout:candidate", ts: e.ts };
-  } else if (k === "scout:skip") { s.scanned++; const c = s.coin[e.item] = s.coin[e.item] || {}; c.held = true; }
-  else if (k === "scout:error" || k === "executor:error" || k === "posmgr:error") s.errors++;
+    s.coin[v.coin] = { move: v.move24h_pct, vol: v.vol_ratio, cand: k === "scout:candidate", ts: e.ts, gap: k === "scout:candidate" ? 0 : v.gap_pct };
+    s.chk++; s.lastCoin = { coin: v.coin, move: v.move24h_pct, vol: v.vol_ratio, gap: k === "scout:candidate" ? 0 : v.gap_pct, cand: k === "scout:candidate", ts: e.ts };
+    if (k === "scout:no_signal" && v.trend_ok != null) { s.nsF++; if (!v.trend_ok) s.ns.trend++; if (!v.volume_ok) s.ns.vol++; if (!v.green) s.ns.red++; }
+  } else if (k === "scout:skip") { s.scanned++; s.held++; const c = s.coin[e.item] = s.coin[e.item] || {}; c.held = true; }
+  else if (k === "scout:error" || k === "executor:error" || k === "posmgr:error") { s.errors++; if (k === "executor:error") s.failed++; }
   else if (k === "filter:pass") s.passed++;
-  else if (e.stage === "filter" && e.decision === "reject") for (const r of e.reason.split(", ")) s.rej.filter[r] = (s.rej.filter[r] || 0) + 1;
-  else if (k === "risk:approve") s.approved++;
-  else if (e.stage === "risk" && e.decision === "reject") { for (const r of e.reason.split(", ")) s.rej.risk[r] = (s.rej.risk[r] || 0) + 1; if (e.reason === "daily loss halt") s.halted = true; }
+  else if (e.stage === "filter" && e.decision === "reject") { s.fRej++; for (const r of e.reason.split(", ")) s.rej.filter[r] = (s.rej.filter[r] || 0) + 1; }
+  else if (k === "risk:approve") { s.approved++; s.rin++; s.sent++; s.lastSize = v.size_cad; }
+  else if (k === "risk:defer") { s.rin++; s.rDef++; }
+  else if (e.stage === "risk" && e.decision === "reject") { s.rin++; s.rRej++; for (const r of e.reason.split(", ")) s.rej.risk[r] = (s.rej.risk[r] || 0) + 1; if (e.reason === "daily loss halt") s.halted = true; }
   else if (k === "risk:pause") s.paused = true;
   else if (k === "executor:filled") {
     if (v.pnl_cad == null) {
@@ -93,10 +101,15 @@ function apply(s, e, fx) {
     } else {
       const p = s.pos[v.pos_id] || { id: v.pos_id, pair: v.pair, coin: posCoin(v.pair), entry: null, cost: null, ts: null };
       delete s.pos[v.pos_id]; if (s.coin[p.coin]) s.coin[p.coin].held = false;
-      s.pnl += v.pnl_cad; v.pnl_cad >= 0 ? s.wins++ : s.losses++;
+      s.pnl += v.pnl_cad; v.pnl_cad >= 0 ? s.wins++ : s.losses++; s.streak = v.pnl_cad >= 0 ? 0 : s.streak + 1;
+      const xr = (v.exit_reason || "exit"); s.exitWhy[xr] = (s.exitWhy[xr] || 0) + 1;
       s.closed.unshift({ ...p, exit: v.price, pnl: v.pnl_cad, pct: v.pnl_pct, why: v.exit_reason, tc: e.ts });
     }
-  } else if (e.stage === "posmgr" && (e.decision === "hold" || e.decision === "stop_raised")) {
+    s.lastFill = e;
+  } else if (k === "executor:reject") s.failed++;
+  else if (k === "posmgr:exit_signal") s.sent++, s.sentSell++;
+  else if (e.stage === "posmgr" && (e.decision === "hold" || e.decision === "stop_raised")) {
+    if (e.decision === "hold") s.holds++; else { s.stops++; v.stop_kind === "breakeven" ? s.be++ : s.trail++; }
     const id = +String(e.item).replace("pos-", ""), p = s.pos[id];
     if (p) { if (v.bid != null) p.bid = v.bid; if (v.stop != null) p.stop = v.stop; if (v.stop_kind) p.kind = v.stop_kind; if (v.peak != null) p.peak = v.peak; }
   }
@@ -237,7 +250,9 @@ function build() {
     <div class="spd" id="spd">${[1, 10, 60, 300].map(x => `<button data-s="${x}">${x}x</button>`).join("")}</div>
     <div class="scrub"><input type="range" id="scrub" min="0" max="0" value="0"><span id="evc">event 0 / 0</span></div>
   </div>
-  <div id="agents">${ST.map(s => `<div class="agent idle" id="ag-${s.k}" style="--ac:${s.c}"><div class="ic"><svg viewBox="0 0 24 24">${s.ic}</svg></div><div class="bd"><div class="nm">${s.name}<small>${s.role}</small></div><div class="doing">Waiting…</div></div><div class="pillo">IDLE</div></div>`).join("")}</div>`;
+  <div class="agents-hint">big numbers = tonight · small = all-time · tap a card to fold</div>
+  <div id="agents">${ST.map(s => `<div class="agent idle" id="ag-${s.k}" style="--ac:${s.c}"><div class="ic"><svg viewBox="0 0 24 24">${s.ic}</svg></div><div class="bd"><div class="nm">${s.name}<small>${s.role}</small></div><div class="doing">Waiting…</div></div><div class="pillo">IDLE</div><div class="det" id="det-${s.k}"></div></div>`).join("")}
+  <div class="agent idle" id="ag-sup" style="--ac:var(--indigo)"><div class="ic"><svg viewBox="0 0 24 24"><path d="M12 3v4M12 17v4M3 12h4M17 12h4"/><circle cx="12" cy="12" r="3.5"/></svg></div><div class="bd"><div class="nm">Supervisor<small>workers, restarts &amp; publisher</small></div><div class="doing">Waiting…</div></div><div class="pillo">—</div><div class="det" id="det-sup"></div></div></div>`;
   $("#v-activity").innerHTML = `
   <div class="h"><span>Funnel</span><span class="mono" id="fun-n" style="letter-spacing:0;text-transform:none"></span></div>
   <div class="card fun" id="fun"></div>
@@ -245,6 +260,7 @@ function build() {
   <div class="logbox"><div class="lh"><span>logger.tail</span><span id="log-st">● live</span></div><div class="log" id="log"></div></div>`;
   $("#v-trades").innerHTML = `<div id="tr-sum" class="h"></div><div id="tr-open"></div><div class="h" id="tr-ch"><span>Closed</span></div><div id="tr-closed"></div>`;
   for (const b of document.querySelectorAll(".seg button")) b.onclick = () => setMode(b.dataset.m);
+  for (const h of document.querySelectorAll(".agent")) h.onclick = e => { if (e.target.closest(".det")) return; h.classList.toggle("fold"); };
   for (const b of document.querySelectorAll("#spd button")) b.onclick = () => { speed = +b.dataset.s; dirty = true; };
   $("#scrub").oninput = e => { if (mode === "live" || mode === "replay") mode = "pause"; seek(+e.target.value, true); };
   for (const b of document.querySelectorAll("#tabs button")) b.onclick = () => tab(b.dataset.tab);
@@ -350,7 +366,142 @@ function render() {
     const stopped = ev && ev.item === "sys" && ev.decision === "stop";
     setT(el.querySelector(".pillo"), stopped ? "STOPPED" : act ? s.act : !ev ? "WAITING" : s.k === "posmgr" ? (nopen ? "WATCHING " + nopen : "FLAT") : "IDLE");
   }
-  renderFunnel(); renderLog(); renderTrades();
+  renderAgentDetails(); renderFunnel(); renderLog(); renderTrades();
+}
+
+/* ---------- agent cards: counters, reason bars, sparklines (all derived from the events up to the replay cursor) ---------- */
+const PV = {}, nf = n => (+n || 0).toLocaleString("en-CA");
+const SHORT = { btc_filter: "BTC below 1h EMA50", trend: "Trend not aligned", move_band: "24h move out of band", "no_signal: volume below 1.2x": "Volume below 1.2×",
+  "no_signal: candle not green": "Candle not green", cooldown: "Cooldown after a loss", "signal candle already traded": "Candle already traded",
+  "paused: consecutive-loss limit hit tonight": "Losing-streak pause", "daily loss halt": "Daily loss stop", chase: "Chase cap", "max open positions reached": "Max positions",
+  "ranked below the free slots (weaker 24h move)": "Ranked below free slots", below_min_order: "Below min order", "order already pending/open for this pair": "Order already pending" };
+const short = r => SHORT[r] || label(r);
+const EXITL = { stop_loss: "Initial stop", trailing_stop: "Trailing stop", stop_breakeven_lock: "Break-even lock", time_exit_0800ET: "08:00 time exit", stale_outside_window: "Stale / outside window" };
+const mergeM = (a, b) => { const o = { ...(a || {}) }; for (const k in b || {}) o[k] = (o[k] || 0) + b[k]; return o; };
+function supList() {
+  const ref = (mode === "live" && cur >= EV.length) ? 1e12 : (S.lastEv ? S.lastEv.ts : 0);
+  return ((D && D.sup) || []).filter(x => x[0] <= ref);
+}
+function totals() {
+  const sl = supList().filter(x => x[2] === "restart");
+  return { scans: S.btcPass + S.btcBlock, btc_block: S.btcBlock, checks: S.chk, held: S.held, cands: S.cands, f_in: S.passed + S.fRej, f_pass: S.passed, f_rej: S.fRej, f_reasons: S.rej.filter,
+    r_in: S.rin, r_ok: S.approved, r_rej: S.rRej, r_reasons: S.rej.risk, sent: S.sent, filled_b: S.buys, filled_s: S.wins + S.losses, failed: S.failed, stops: S.stops, be: S.be, holds: S.holds,
+    wins: S.wins, losses: S.losses, pnl: S.pnl, restarts: sl.length, errors: S.errors, _sup: sl };
+}
+function allOf(T) {
+  const P = (D && D.prior) || {}, A = {};
+  for (const k in T) A[k] = (T[k] && typeof T[k] === "object" && !Array.isArray(T[k])) ? mergeM(P[k], T[k]) : (typeof T[k] === "number" ? (P[k] || 0) + T[k] : T[k]);
+  A.nights = (P.nights || 0) + 1; return A;
+}
+function cell(key, val, lab, all, col, raw) {
+  const v = String(val), ch = PV[key] !== undefined && PV[key] !== v && mode !== "pause"; PV[key] = v;
+  return `<div class="c${ch ? " bump" : ""}"><b${col ? ` style="color:${col}"` : ""}>${esc(v)}</b><i>${raw != null ? esc(raw) : all != null ? "all " + esc(all) : "&nbsp;"}</i><span>${esc(lab)}</span></div>`;
+}
+const cells = a => `<div class="cells">${a.join("")}</div>`;
+function split(parts, legend) {   // parts: [[n, color]]; legend: [[text,color]]
+  const tot = parts.reduce((a, p) => a + p[0], 0);
+  return `<div class="sb">${tot ? parts.map(p => `<i style="width:${p[0] / tot * 100}%;background:${p[1]}"></i>`).join("") : ""}</div><div class="sbl">${legend.map(l => `<span style="color:${l[1] || ""}">${esc(l[0])}</span>`).join("")}</div>`;
+}
+const sec = (t, r) => `<div class="sec"><span>${esc(t)}</span><span>${r ? esc(r) : ""}</span></div>`;
+function rows(list, max, col, keep) {   // [[label, n, all]] non-zero first; zeros collapsed in one line. keep=true: fixed order, every row shown
+  const nz = keep ? list : list.filter(x => x[1] > 0), z = keep ? [] : list.filter(x => !(x[1] > 0));
+  let h = (keep ? nz : nz.sort((a, b) => b[1] - a[1])).map(x => `<div class="rr${x[1] > 0 ? "" : " z"}"><span>${esc(x[0])}</span><span><b>${nf(x[1])}</b>${x[2] != null && x[2] !== x[1] ? `<em> / ${nf(x[2])}</em>` : ""}</span><i class="f" style="width:${Math.min(100, x[1] / Math.max(1, max) * 100)}%;background:${col}"></i></div>`).join("");
+  if (z.length) h += `<div class="rr z"><span>none yet · ${esc(z.map(x => x[0]).join(" · "))}</span></div>`;
+  return h;
+}
+function kv(a) { return `<div class="kv">${a.map(x => `<div>${esc(x[0])}<b${x[2] ? ` style="color:${x[2]}"` : ""}>${esc(x[1])}</b></div>`).join("")}</div>`; }
+function spark(stage, col) {
+  const sp = (S.spark[stage]) || {}, end = S.lastEv ? Math.floor(S.lastEv.ts / 600) : 0, N = 36; let mx = 1, bars = "";
+  for (let i = 0; i < N; i++) mx = Math.max(mx, sp[end - N + 1 + i] || 0);
+  for (let i = 0; i < N; i++) { const n = sp[end - N + 1 + i] || 0, h = n ? Math.max(2, n / mx * 22) : 1; bars += `<rect x="${i * 4}" y="${24 - h}" width="3" height="${h}" rx="1" fill="${n ? col : "#222"}"${i === N - 1 ? ' opacity=".9"' : ""}/>`; }
+  const t0 = (end - N + 1) * 600;
+  return `<div class="spark"><svg viewBox="0 0 144 24" preserveAspectRatio="none">${bars}</svg><div class="sl"><span>${S.lastEv ? hms(t0).slice(0, 5) : ""}</span><span>events / 10 min</span><span>${S.lastEv ? hms(S.lastEv.ts).slice(0, 5) : ""}</span></div></div>`;
+}
+const lastLine = k => { const e = S.last[k]; return e && e.item !== "sys" ? `<div class="last"><b>${hms(e.ts)}</b> ${esc(describe(e))}</div>` : `<div class="last dim">no decision yet${e ? " · worker up since " + hms(e.ts) : ""}</div>`; };
+function medInterval() {
+  const t = S.scanTs, d = []; for (let i = 1; i < t.length; i++) if (t[i] - t[i - 1] < 600 && t[i] > t[i - 1]) d.push(t[i] - t[i - 1]);
+  if (!d.length) return null; d.sort((a, b) => a - b); return d[d.length >> 1];
+}
+function renderAgentDetails() {
+  if (!isOpenView("agents")) return;
+  const T = totals(), A = allOf(T), R = CFG.rules || {}, C = CFG.currency, nopen = Object.keys(S.pos).length;
+  const liveEnd = mode === "live" && cur >= EV.length;
+  const stg = (D && D.state && D.state.stages) || {}, qs = (D && D.state && D.state.queues) || {};
+  // ---- scout
+  { const iv = medInterval(), nb = S.chk - S.cands, rate = iv ? (iv >= 90 ? Math.round(iv / 60) + "m" : Math.round(iv) + "s") : "—";
+    let h = cells([cell("sc.scans", nf(T.scans), "scans", nf(A.scans), "var(--blue)"), cell("sc.chk", nf(T.checks), "coins checked", nf(A.checks)), cell("sc.cand", nf(T.cands), "candidates", nf(A.cands), T.cands ? "var(--orange)" : ""), cell("sc.rate", rate, "per scan", null, "", CFG.coins.length + " coins/scan")]);
+    h += split([[S.cands, "var(--orange)"], [nb, "#2d4b73"]], [[`${nf(S.cands)} breakout${S.cands == 1 ? "" : "s"}`, "var(--orange)"], [`${nf(nb)} no breakout`, "var(--blue)"]]);
+    const rw = [["No breakout above 24h high", nb]];
+    if (S.nsF) rw.push(["…trend aligned (EMA20 > EMA50)", S.nsF - S.ns.trend], ["…volume ≥ 1.2×", S.nsF - S.ns.vol], ["…candle green", S.nsF - S.ns.red]);
+    h += sec("Pre-screen of coin checks") + rows(rw, Math.max(nb, 1), "var(--blue)", true);
+    const sc = T.scans; h += `<div class="rr"><span>BTC gate closed in</span><span><b class="${S.btcBlock ? "r" : "g"}">${nf(S.btcBlock)}</b><em> of ${nf(sc)} scans${sc ? " · " + Math.round(S.btcBlock / sc * 100) + "%" : ""}</em></span></div>`;
+    const cl = Object.entries(S.coin).filter(([c, x]) => x.gap != null && !x.held).sort((a, b) => a[1].gap - b[1].gap).slice(0, 3);
+    if (cl.length) h += sec("Closest to a breakout") + `<div class="chp">${cl.map(([c, x]) => `<span><b>${esc(c)}</b> ${x.gap <= 0 ? "breaking out" : x.gap.toFixed(1) + "% below"}</span>`).join("")}</div>`;
+    const lc = S.lastCoin; h += lc ? `<div class="last"><b>${hms(lc.ts)}</b> last checked <b class="w">${esc(lc.coin)}</b> · ${sg(lc.move ?? 0, 1)}% 24h · vol ${(lc.vol ?? 0).toFixed(2)}×${lc.gap != null && !lc.cand ? " · " + lc.gap.toFixed(1) + "% below 24h high" : ""}</div>` : '<div class="last dim">no coin checked yet</div>';
+    h += sec("Activity", "last 6h") + spark("scout", "var(--blue)");
+    setH($("#det-scout"), h); }
+  // ---- filter
+  { const rej = S.rej.filter, ar = A.f_reasons || {}, ord = ["btc_filter", "trend", "move_band", "no_signal: volume below 1.2x", "no_signal: candle not green", "cooldown", "signal candle already traded"];
+    const keys = [...ord, ...Object.keys(rej).filter(k => !ord.includes(k)), ...Object.keys(ar).filter(k => !ord.includes(k) && !(k in rej))];
+    const pct = T.f_in ? Math.round(T.f_pass / T.f_in * 100) + "%" : "—";
+    let h = cells([cell("fi.in", nf(T.f_in), "received", nf(A.f_in), "var(--orange)"), cell("fi.ok", nf(T.f_pass), "accepted", nf(A.f_pass), T.f_pass ? "var(--green)" : ""), cell("fi.rej", nf(T.f_rej), "rejected", nf(A.f_rej), T.f_rej ? "var(--red)" : ""), cell("fi.pct", pct, "accept rate", A.f_in ? Math.round(A.f_pass / A.f_in * 100) + "%" : null)]);
+    h += split([[T.f_pass, "var(--green)"], [T.f_rej, "var(--red)"]], [[`${nf(T.f_pass)} accepted`, "var(--green)"], [`${nf(T.f_rej)} rejected`, "var(--red)"]]);
+    h += sec("Rejection reasons", "tonight / all-time") + rows(keys.map(k => [short(k), rej[k] || 0, A.f_reasons ? ar[k] || 0 : null]), Math.max(1, ...Object.values(rej)), "var(--orange)");
+    if (!T.f_in) h += `<div class="note">No candidates have reached the filter tonight — ${S.chk ? `all ${nf(S.chk - S.cands)} coin checks stopped at Scout's breakout check` : "Scout hasn't found a breakout yet"}.</div>`;
+    h += sec("BTC gate (checked every scan)") + (S.btc ? kv([["Gate", S.btc.ok ? "OPEN" : "CLOSED", S.btc.ok ? "var(--green)" : "var(--red)"], ["BTC vs 1h EMA50", sg(S.btc.pct ?? 0, 2) + "%", S.btc.ok ? "var(--green)" : "var(--red)"]]) : '<div class="dim" style="font-size:12px">waiting for the first scan</div>');
+    h += lastLine("filter") + sec("Activity", "last 6h") + spark("filter", "var(--orange)");
+    setH($("#det-filter"), h); }
+  // ---- risk
+  { const rej = S.rej.risk, ar = A.r_reasons || {}, ord = ["paused: consecutive-loss limit hit tonight", "daily loss halt", "chase", "max open positions reached", "ranked below the free slots (weaker 24h move)", "below_min_order", "order already pending/open for this pair"];
+    const keys = [...ord, ...Object.keys(rej).filter(k => !ord.includes(k)), ...Object.keys(ar).filter(k => !ord.includes(k) && !(k in rej))];
+    const eq = equity(), maxp = CFG.max_positions, slotsUsed = nopen;
+    let h = cells([cell("rk.in", nf(T.r_in), "received", nf(A.r_in), "var(--red)"), cell("rk.ok", nf(T.r_ok), "approved", nf(A.r_ok), T.r_ok ? "var(--green)" : ""), cell("rk.rej", nf(T.r_rej), "blocked", nf(A.r_rej), T.r_rej ? "var(--red)" : ""), cell("rk.slot", `${slotsUsed}/${maxp}`, "slots used")]);
+    h += split([[T.r_ok, "var(--green)"], [T.r_rej, "var(--red)"]], [[`${nf(T.r_ok)} approved`, "var(--green)"], [`${nf(T.r_rej)} blocked${S.rDef ? " · " + S.rDef + " deferred" : ""}`, "var(--red)"]]);
+    h += sec("Block reasons", "tonight / all-time") + rows(keys.map(k => [k === "chase" ? `Chase cap (>${R.max_chase_pct ?? 3}%)` : short(k), rej[k] || 0, A.r_reasons ? ar[k] || 0 : null]), Math.max(1, ...Object.values(rej)), "var(--red)");
+    const stopC = CFG.start_capital * CFG.daily_stop_pct / 100, used = Math.max(0, -S.pnl), mc = R.max_consecutive_losses ?? 2;
+    h += sec("Limits & sizing now") + kv([
+      ["Entry size", `${CFG.risk_pct}% equity ≈ ${(eq * CFG.risk_pct / 100).toFixed(2)} ${C}`], ["Memes (DOGE, PEPE)", `${CFG.risk_pct_meme ?? 5}% ≈ ${(eq * (CFG.risk_pct_meme ?? 5) / 100).toFixed(2)} ${C}`],
+      ["Stop", `${R.atr_stop_mult ?? 2}×ATR · ${R.stop_min_pct ?? 2}–${R.stop_max_pct ?? 6}% (memes ${R.stop_max_pct_meme ?? 8}%)`], ["Trail / break-even", `${R.trail_atr_mult ?? 2.5}×ATR / +${R.breakeven_arm_atr ?? 1.5}×ATR`],
+      ["Loss streak", `${S.streak} / ${mc}${S.paused ? " · PAUSED" : ""}`, S.paused ? "var(--orange)" : ""], ["Day P&L vs stop", `${sg(S.pnl)} / −${stopC.toFixed(2)} ${C}${S.halted ? " · HALT" : ""}`, S.halted ? "var(--red)" : ""],
+      ["Last approved size", S.lastSize != null ? `${S.lastSize.toFixed(2)} ${C}` : "—"], ["Chase cap", `${R.max_chase_pct ?? 3}% above the signal close`]]);
+    h += split([[Math.min(used, stopC), used >= stopC ? "var(--red)" : "var(--orange)"], [Math.max(0, stopC - used), "#26262a"]], [[`daily stop used ${(Math.min(used, stopC) / stopC * 100).toFixed(0)}%`, ""]]);
+    h += lastLine("risk") + sec("Activity", "last 6h") + spark("risk", "var(--red)");
+    setH($("#det-risk"), h); }
+  // ---- executor
+  { const filled = T.filled_b + T.filled_s, pend = Math.max(0, T.sent - filled - T.failed), fl = S.lastFill;
+    let h = cells([cell("ex.sent", nf(T.sent), "orders sent", nf(A.sent), "var(--green)"), cell("ex.fill", nf(filled), "filled", nf(A.filled_b + A.filled_s), filled ? "var(--green)" : ""), cell("ex.fail", nf(T.failed), "failed", nf(A.failed), T.failed ? "var(--red)" : ""), cell("ex.pend", nf(pend), "pending")]);
+    h += split([[filled, "var(--green)"], [T.failed, "var(--red)"], [pend, "var(--yellow)"]], [[`${nf(filled)} filled`, "var(--green)"], [`${nf(T.failed)} failed`, "var(--red)"], [`${nf(pend)} pending`, "var(--yellow)"]]);
+    h += sec("Orders", "tonight / all-time") + rows([["Buys sent (approved by Risk)", T.r_ok, A.r_ok], ["Sells sent (exit signals)", S.sentSell, null], ["Buys filled", T.filled_b, A.filled_b], ["Sells filled", T.filled_s, A.filled_s], ["Rejected / errors", T.failed, A.failed]], Math.max(1, T.sent, T.filled_b), "var(--green)", true);
+    h += kv([["Mode", "PAPER · simulated fills"], ["Queue now", liveEnd && qs.exec ? `${qs.exec.ready} ready · ${qs.exec.claimed} claimed` : liveEnd ? "—" : "live only"]]);
+    h += fl ? `<div class="last"><b>${hms(fl.ts)}</b> ${esc(describe(fl))}</div>` : '<div class="last dim">no fills yet</div>';
+    h += sec("Activity", "last 6h") + spark("executor", "var(--green)");
+    setH($("#det-executor"), h); }
+  // ---- position manager
+  { const open = Object.values(S.pos);
+    let h = cells([cell("pm.open", nopen, "open now", null, nopen ? "var(--green)" : ""), cell("pm.chk", nf(T.holds), "pos. checks", nf(A.holds)), cell("pm.stop", nf(T.stops), "stop moves", nf(A.stops), T.stops ? "var(--yellow)" : ""), cell("pm.wl", `${T.wins}-${T.losses}`, "wins–losses", `${A.wins}-${A.losses}`)]);
+    h += `<div class="pnl"><span>Closed P&L</span><b class="${T.pnl > 0.0005 ? "g" : T.pnl < -0.0005 ? "r" : "dim"}">${sg(T.pnl)} ${C}</b><em>all ${sg(A.pnl)} ${C}</em></div>`;
+    h += split([[T.wins, "var(--green)"], [T.losses, "var(--red)"]], [[`${T.wins} win${T.wins == 1 ? "" : "s"}`, "var(--green)"], [`${T.losses} loss${T.losses == 1 ? "" : "es"}`, "var(--red)"]]);
+    h += sec("Stop moves tonight") + rows([["Trailing stop raised", S.trail], ["Break-even lock armed", S.be]], Math.max(1, S.trail, S.be), "var(--yellow)", true);
+    const ex = Object.entries(S.exitWhy); h += sec("Exits tonight") + (ex.length ? rows(ex.map(([k, n]) => [EXITL[k] || label(k), n]), Math.max(1, ...ex.map(x => x[1])), "var(--yellow)") : '<div class="rr z"><span>none yet</span></div>');
+    if (open.length) h += sec("Open positions") + open.map(p => { const px = liveEnd && LIVE[p.coin] ? LIVE[p.coin].bid || LIVE[p.coin].last : p.bid, pc = (px / p.entry - 1) * 100, sd = (px / p.stop - 1) * 100;
+      return `<div class="rr"><span><b class="w">${esc(p.coin)}</b> <em>${esc(p.kind)} stop ${fmtP(p.stop)} · ${sd.toFixed(1)}% away</em></span><b class="${pc >= 0 ? "g" : "r"}">${sg(pc)}%</b></div>`; }).join("");
+    h += lastLine("posmgr") + sec("Activity", "last 6h") + spark("posmgr", "var(--yellow)");
+    setH($("#det-posmgr"), h); }
+  // ---- supervisor / publisher
+  { const sl = T._sup, byW = {}; for (const x of sl) byW[x[1]] = (byW[x[1]] || 0) + 1;
+    const nstart = Object.values(S.starts).reduce((a, b) => a + b, 0), lr = sl[sl.length - 1], ages = Object.values(stg).map(x => x.age_s).filter(x => x != null),
+      age = D && ages.length ? Date.now() / 1000 - D.generated_at + Math.min(...ages) : null;
+    const hb = k => { const x = stg[k], ev = S.last[k]; return [SBY[k].name, liveEnd && x ? `${x.state || "ok"} · last event ${ev ? hms(ev.ts) : "—"}` : ev ? `last event ${hms(ev.ts)}` : "—"]; };
+    let h = cells([cell("su.rs", nf(T.restarts), "restarts", nf(A.restarts), T.restarts ? "var(--orange)" : "var(--green)"), cell("su.st", nf(nstart), "worker starts"), cell("su.er", nf(T.errors), "errors", nf(A.errors), T.errors ? "var(--red)" : ""), cell("su.hb", liveEnd && age != null ? (age < 90 ? Math.round(age) + "s" : ago(age).replace(" ago", "")) : "—", "last heartbeat")]);
+    const bw = Object.entries(byW).filter(x => x[0]).map(([w, n]) => [SBY[w] ? SBY[w].name : w, n]);
+    h += sec("Restarts by worker") + (bw.length ? rows(bw, Math.max(...bw.map(x => x[1])), "var(--orange)") : '<div class="rr z"><span>no restarts in this night</span></div>');
+    h += sec("Workers") + kv(ST.map(s => hb(s.k)));
+    h += sec("Publisher") + kv([["Last publish", D ? fD.format(new Date(D.generated_at * 1000)) + " ET" : "—"], ["Data up to event", D ? "#" + D.last_seq : "—"], ["Events loaded", nf(EV.length)], ["Source", Q.get("data") ? "demo file" : "GitHub (every ~1 min)"]]);
+    h += lr ? `<div class="last"><b>${hms(lr[0])}</b> ${esc(lr[3])}</div>` : '<div class="last dim">no restarts</div>';
+    setH($("#det-sup"), h);
+    const el = $("#ag-sup"), act = T.restarts && lr && S.lastEv && S.lastEv.ts - lr[0] < 300;
+    setT(el.querySelector(".doing"), lr ? `${lr[3]} · ${hms(lr[0])}` : "All workers running · no restarts"); el.classList.toggle("active", !!act); el.classList.toggle("idle", !act);
+    setT(el.querySelector(".pillo"), T.restarts ? `${T.restarts} RESTART${T.restarts == 1 ? "" : "S"}` : "STABLE"); }
 }
 function renderLight() { if (!S) return; const e = S.lastEv; if (e && mode === "live") { const a = $("#banner .ago"); if (a) a.textContent = ago(Date.now() / 1000 - e.ts); } }
 function priceTick(name, prev) {

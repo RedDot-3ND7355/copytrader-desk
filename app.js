@@ -230,6 +230,7 @@ const V = {};   // cached element refs
 function mk(html) { const t = document.createElement("template"); t.innerHTML = html.trim(); return t.content.firstChild; }
 function build() {
   $("#v-overview").innerHTML = `
+  <div class="strip" id="strip">${[...ST.map(s => [s.k, s.k === "posmgr" ? "Positions" : s.name, s.c]), ["sup", "Supervisor", "var(--indigo)"]].map(a => `<button class="sc idle" id="sc-${a[0]}" style="--ac:${a[2]}" aria-label="${a[1]} agent, open Agents tab"><span class="sn"><i></i>${a[1]}</span><b>0</b><em></em></button>`).join("")}</div>
   <div class="banner" id="banner"><i class="dot"></i><div class="t">Loading…</div><div class="ago"></div></div>
   <div class="card bal">
     <div class="meta"><div>Start<b id="m-start">—</b></div><div>Risk<b id="m-risk">—</b></div><div>Max pos<b id="m-max">—</b></div><div>Daily stop<b id="m-stop">—</b></div></div>
@@ -250,9 +251,9 @@ function build() {
     <div class="spd" id="spd">${[1, 10, 60, 300].map(x => `<button data-s="${x}">${x}x</button>`).join("")}</div>
     <div class="scrub"><input type="range" id="scrub" min="0" max="0" value="0"><span id="evc">event 0 / 0</span></div>
   </div>
-  <div class="agents-hint">big numbers = tonight · small = all-time · tap a card to fold</div>
-  <div id="agents">${ST.map(s => `<div class="agent idle" id="ag-${s.k}" style="--ac:${s.c}"><div class="ic"><svg viewBox="0 0 24 24">${s.ic}</svg></div><div class="bd"><div class="nm">${s.name}<small>${s.role}</small></div><div class="doing">Waiting…</div></div><div class="pillo">IDLE</div><div class="det" id="det-${s.k}"></div></div>`).join("")}
-  <div class="agent idle" id="ag-sup" style="--ac:var(--indigo)"><div class="ic"><svg viewBox="0 0 24 24"><path d="M12 3v4M12 17v4M3 12h4M17 12h4"/><circle cx="12" cy="12" r="3.5"/></svg></div><div class="bd"><div class="nm">Supervisor<small>workers, restarts &amp; publisher</small></div><div class="doing">Waiting…</div></div><div class="pillo">—</div><div class="det" id="det-sup"></div></div></div>`;
+  <div class="vt"><span class="agents-hint" id="ahint"></span><button id="cmp" aria-pressed="false"><svg viewBox="0 0 12 12"><path d="M1 1h4v4H1zM7 1h4v4H7zM1 7h4v4H1zM7 7h4v4H7z"/></svg>Compact</button></div>
+  <div id="agents">${ST.map(s => `<div class="agent idle" id="ag-${s.k}" style="--ac:${s.c}"><div class="ic"><svg viewBox="0 0 24 24">${s.ic}</svg></div><div class="bd"><div class="nm">${s.name}<small>${s.role}</small></div><div class="doing">Waiting…</div></div><div class="pillo">IDLE</div><div class="mini" id="mini-${s.k}"></div><div class="det" id="det-${s.k}"></div></div>`).join("")}
+  <div class="agent idle" id="ag-sup" style="--ac:var(--indigo)"><div class="ic"><svg viewBox="0 0 24 24"><path d="M12 3v4M12 17v4M3 12h4M17 12h4"/><circle cx="12" cy="12" r="3.5"/></svg></div><div class="bd"><div class="nm">Supervisor<small>workers, restarts &amp; publisher</small></div><div class="doing">Waiting…</div></div><div class="pillo">—</div><div class="mini" id="mini-sup"></div><div class="det" id="det-sup"></div></div></div>`;
   $("#v-activity").innerHTML = `
   <div class="h"><span>Funnel</span><span class="mono" id="fun-n" style="letter-spacing:0;text-transform:none"></span></div>
   <div class="card fun" id="fun"></div>
@@ -260,10 +261,20 @@ function build() {
   <div class="logbox"><div class="lh"><span>logger.tail</span><span id="log-st">● live</span></div><div class="log" id="log"></div></div>`;
   $("#v-trades").innerHTML = `<div id="tr-sum" class="h"></div><div id="tr-open"></div><div class="h" id="tr-ch"><span>Closed</span></div><div id="tr-closed"></div>`;
   for (const b of document.querySelectorAll(".seg button")) b.onclick = () => setMode(b.dataset.m);
-  for (const h of document.querySelectorAll(".agent")) h.onclick = e => { if (e.target.closest(".det")) return; h.classList.toggle("fold"); };
+  for (const h of document.querySelectorAll(".agent")) h.onclick = e => { if (e.target.closest(".det") || COMPACT) return; h.classList.toggle("fold"); };
+  $("#cmp").onclick = () => setCompact(!COMPACT);
+  setCompact(COMPACT, true);
   for (const b of document.querySelectorAll("#spd button")) b.onclick = () => { speed = +b.dataset.s; dirty = true; };
   $("#scrub").oninput = e => { if (mode === "live" || mode === "replay") mode = "pause"; seek(+e.target.value, true); };
   for (const b of document.querySelectorAll("#tabs button")) b.onclick = () => tab(b.dataset.tab);
+  for (const b of document.querySelectorAll("#strip .sc")) b.onclick = () => tab("agents");
+}
+let COMPACT = Q.get("compact") ? Q.get("compact") === "1" : (() => { try { return localStorage.getItem("ct-compact") === "1"; } catch (e) { return false; } })();
+function setCompact(on, init) {
+  COMPACT = !!on; if (!init) { try { localStorage.setItem("ct-compact", on ? "1" : "0"); } catch (e) {} }
+  $("#agents").classList.toggle("compact", COMPACT); $("#cmp").classList.toggle("on", COMPACT); $("#cmp").setAttribute("aria-pressed", COMPACT);
+  $("#ahint").textContent = COMPACT ? "tonight's counts · tap Compact to expand" : "big numbers = tonight · small = all-time · tap a card to fold";
+  dirty = true; if (!init) window.scrollTo(0, 0);
 }
 function setMode(m) {
   if (m === "replay") { if (mode !== "pause" || cur >= EV.length) { seek(0, false); simT = EV.length ? EV[0].ts - 1 : 0; } mode = "replay"; }
@@ -366,7 +377,7 @@ function render() {
     const stopped = ev && ev.item === "sys" && ev.decision === "stop";
     setT(el.querySelector(".pillo"), stopped ? "STOPPED" : act ? s.act : !ev ? "WAITING" : s.k === "posmgr" ? (nopen ? "WATCHING " + nopen : "FLAT") : "IDLE");
   }
-  renderAgentDetails(); renderFunnel(); renderLog(); renderTrades();
+  renderStrip(nopen, now); renderAgentDetails(); renderFunnel(); renderLog(); renderTrades();
 }
 
 /* ---------- agent cards: counters, reason bars, sparklines (all derived from the events up to the replay cursor) ---------- */
@@ -421,6 +432,17 @@ const lastLine = k => { const e = S.last[k]; return e && e.item !== "sys" ? `<di
 function medInterval() {
   const t = S.scanTs, d = []; for (let i = 1; i < t.length; i++) if (t[i] - t[i - 1] < 600 && t[i] > t[i - 1]) d.push(t[i] - t[i - 1]);
   if (!d.length) return null; d.sort((a, b) => a - b); return d[d.length >> 1];
+}
+function renderMini(T, nopen, age, lr) {
+  const bar = p => { const t = p.reduce((a, x) => a + x[0], 0); return `<div class="sb">${t ? p.map(x => `<i style="width:${x[0] / t * 100}%;background:${x[1]}"></i>`).join("") : ""}</div>`; };
+  const m = (k, a, b) => setH($("#mini-" + k), cells(a.map((x, i) => cell("m." + k + i, x[0], x[1], null, x[2]))) + bar(b));
+  const filled = T.filled_b + T.filled_s, pend = Math.max(0, T.sent - filled - T.failed), liveEnd = mode === "live" && cur >= EV.length;
+  m("scout", [[nf(T.scans), "scans", "var(--blue)"], [nf(T.checks), "coins"], [nf(T.cands), "found", T.cands ? "var(--orange)" : ""]], [[T.cands, "var(--orange)"], [S.chk - S.cands, "#2d4b73"]]);
+  m("filter", [[nf(T.f_in), "received", "var(--orange)"], [nf(T.f_pass), "accepted", T.f_pass ? "var(--green)" : ""], [nf(T.f_rej), "rejected", T.f_rej ? "var(--red)" : ""]], [[T.f_pass, "var(--green)"], [T.f_rej, "var(--red)"]]);
+  m("risk", [[nf(T.r_ok), "cleared", T.r_ok ? "var(--green)" : ""], [nf(T.r_rej), "blocked", T.r_rej ? "var(--red)" : ""], [`${nopen}/${CFG.max_positions}`, "slots"]], [[T.r_ok, "var(--green)"], [T.r_rej, "var(--red)"]]);
+  m("executor", [[nf(filled), "filled", filled ? "var(--green)" : ""], [nf(T.failed), "failed", T.failed ? "var(--red)" : ""], [nf(pend), "pending"]], [[filled, "var(--green)"], [T.failed, "var(--red)"], [pend, "var(--yellow)"]]);
+  m("posmgr", [[nopen, "open", nopen ? "var(--green)" : ""], [`${T.wins}-${T.losses}`, "W-L"], [sg(T.pnl, 2), "P&L", T.pnl > 0.0005 ? "var(--green)" : T.pnl < -0.0005 ? "var(--red)" : ""]], [[T.wins, "var(--green)"], [T.losses, "var(--red)"]]);
+  m("sup", [[nf(T.restarts), "restarts", T.restarts ? "var(--orange)" : "var(--green)"], [liveEnd && age != null ? (age < 90 ? Math.round(age) + "s" : ago(age).replace(" ago", "")) : S.lastEv ? hms(S.lastEv.ts).slice(0, 5) : "—", liveEnd ? "beat" : "last ev."], [nf(T.errors), "errors", T.errors ? "var(--red)" : ""]], []);
 }
 function renderAgentDetails() {
   if (!isOpenView("agents")) return;
@@ -499,9 +521,22 @@ function renderAgentDetails() {
     h += sec("Publisher") + kv([["Last publish", D ? fD.format(new Date(D.generated_at * 1000)) + " ET" : "—"], ["Data up to event", D ? "#" + D.last_seq : "—"], ["Events loaded", nf(EV.length)], ["Source", Q.get("data") ? "demo file" : "GitHub (every ~1 min)"]]);
     h += lr ? `<div class="last"><b>${hms(lr[0])}</b> ${esc(lr[3])}</div>` : '<div class="last dim">no restarts</div>';
     setH($("#det-sup"), h);
+    renderMini(T, nopen, age, lr);
     const el = $("#ag-sup"), act = T.restarts && lr && S.lastEv && S.lastEv.ts - lr[0] < 300;
     setT(el.querySelector(".doing"), lr ? `${lr[3]} · ${hms(lr[0])}` : "All workers running · no restarts"); el.classList.toggle("active", !!act); el.classList.toggle("idle", !act);
     setT(el.querySelector(".pillo"), T.restarts ? `${T.restarts} RESTART${T.restarts == 1 ? "" : "S"}` : "STABLE"); }
+}
+function renderStrip(nopen, now) {
+  if (!isOpenView("overview")) return;
+  const T = totals(), filled = T.filled_b + T.filled_s, lr = T._sup[T._sup.length - 1];
+  const v = { scout: [nf(T.scans), "scans"], filter: [nf(T.f_pass), "accepted"], risk: [nf(T.r_ok), "cleared"], executor: [nf(filled), "filled"], posmgr: [nf(nopen), "open"], sup: [nf(T.restarts), "restarts"] };
+  for (const k in v) {
+    const el = $("#sc-" + k); if (!el) continue;
+    const act = k === "sup" ? (T.restarts && lr && S.lastEv && S.lastEv.ts - lr[0] < 300) : (S.at[k] && now - S.at[k] < 1800);
+    el.classList.toggle("active", !!act); el.classList.toggle("idle", !act);
+    const b = el.querySelector("b"), ch = b._x !== undefined && b._x !== v[k][0] && mode !== "pause"; setT(b, v[k][0]); if (ch) { b.classList.remove("bump"); void b.offsetWidth; b.classList.add("bump"); }
+    setT(el.querySelector("em"), v[k][1]);
+  }
 }
 function renderLight() { if (!S) return; const e = S.lastEv; if (e && mode === "live") { const a = $("#banner .ago"); if (a) a.textContent = ago(Date.now() / 1000 - e.ts); } }
 function priceTick(name, prev) {

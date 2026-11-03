@@ -1,8 +1,7 @@
 "use strict";
 /* Copy Trader desk - PAPER only. Vanilla JS, no build step. Data: app-data.json (state + last events) + events-<night>.json (whole night) */
 const Q = new URLSearchParams(location.search);
-const RAW = "https://raw.githubusercontent.com/RedDot-3ND7355/copytrader-desk/data/";
-const SOURCES = Q.get("data") ? [Q.get("data").replace(/\/?$/, "/")] : [RAW, "./"];
+const SOURCES = Q.get("data") ? [Q.get("data").replace(/\/?$/, "/")] : [];
 const POLL_MS = 25000, DRIP_S = 12;
 const ST = [
   { k: "scout", name: "Scout", role: "scans the coins", c: "var(--blue)", act: "SCANNING", ic: '<circle cx="11" cy="11" r="6"/><path d="M21 21l-5.2-5.2"/>' },
@@ -131,12 +130,41 @@ function tick() {
 }
 setInterval(tick, 100);
 
-/* ---------- data ---------- */
-async function getJSON(name) {
-  for (const base of SOURCES) {
-    try { const ac = new AbortController(), tm = setTimeout(() => ac.abort(), 12000); const r = await fetch(base + name + "?t=" + Math.floor(Date.now() / 20000), { cache: "no-store", signal: ac.signal }); clearTimeout(tm); if (r.ok) return await r.json(); console.warn("fetch", base + name + "?t=" + Math.floor(Date.now() / 20000), r.status, Date.now()); } catch (e) { console.warn("fetch failed", base + name, String(e)); }
-  }
+/* ---------- data ----------
+   Sources (the page itself lives on github.io, and raw.githubusercontent.com can answer 404 / be cached ~5 min there, so there are three):
+   1. raw `data` branch   - refreshed every minute by the publisher, CDN-cached up to 5 min
+   2. GitHub API contents - always fresh (60 s cache) but unauthenticated limit is 60 req/h, so used only when 1+3 are stale, max 1 per 90 s, only 00:00-08:45 ET
+   3. ./data/ on Pages    - published every 10 min, always reachable
+   The freshest copy (generated_at) wins. ?data=<dir/> overrides everything (demo / local preview). */
+const REPO = "RedDot-3ND7355/copytrader-desk";
+const RAWB = `https://raw.githubusercontent.com/${REPO}/data/`, APIB = `https://api.github.com/repos/${REPO}/contents/`, PAGES = "./data/";
+let apiOKAt = 0, lastEvFetch = Date.now();
+async function tryOne(url, headers) {
+  try {
+    const ac = new AbortController(), tm = setTimeout(() => ac.abort(), 12000);
+    const r = await fetch(url + (url.includes("?") ? "&" : "?") + "t=" + Math.floor(Date.now() / 20000), { cache: "no-store", signal: ac.signal, headers });
+    clearTimeout(tm);
+    if (r.ok) return await r.json();
+    if (r.status === 403 || r.status === 429) apiOKAt = Math.max(apiOKAt, Date.now() + 15 * 60000);
+  } catch (e) {}
   return null;
+}
+const etHour = () => { const p = new Intl.DateTimeFormat("en-GB", { timeZone: TZ, hour: "2-digit", minute: "2-digit", hour12: false }).formatToParts(new Date()); return +p[0].value + +p[2].value / 60; };
+async function getJSON(name) {          // static-ish file (events): first source that answers
+  if (Q.get("data")) return tryOne(SOURCES[0] + name);
+  return (await tryOne(RAWB + name)) || (await tryOne(PAGES + name)) || (await tryOne(APIB + name + "?ref=data", { Accept: "application/vnd.github.raw" }));
+}
+async function getState() {
+  if (Q.get("data")) return tryOne(SOURCES[0] + "app-data.json");
+  const got = (await Promise.all([tryOne(RAWB + "app-data.json"), tryOne(PAGES + "app-data.json")])).filter(Boolean).sort((x, y) => y.generated_at - x.generated_at);
+  let best = got[0] || null;
+  const age = best ? Date.now() / 1000 - best.generated_at : 1e9;
+  if (age > 150 && Date.now() > apiOKAt && etHour() < 8.75) {
+    apiOKAt = Date.now() + 90000;
+    const c = await tryOne(APIB + "app-data.json?ref=data", { Accept: "application/vnd.github.raw" });
+    if (c && (!best || c.generated_at > best.generated_at)) best = c;
+  }
+  return best;
 }
 const norm = r => ({ seq: r[0], ts: r[1], stage: r[2], item: r[3], decision: r[4], reason: r[5], v: r[6] || {} });
 async function loadEvents(d) {
@@ -144,7 +172,7 @@ async function loadEvents(d) {
   return f ? f.rows.map(norm).filter(e => e.stage !== "server" && e.stage !== "queue") : [];
 }
 async function poll(first) {
-  const d = await getJSON("app-data.json");
+  const d = await getState();
   if (!d) { offline = true; dirty = true; return; }
   offline = false; lastFetchOK = Date.now();
   const newNight = D && D.night !== d.night;
@@ -156,7 +184,7 @@ async function poll(first) {
     if (Q.get("replay")) { speed = +Q.get("speed") || 60; seek(0, false); mode = "replay"; simT = EV.length ? EV[0].ts - 1 : 0; }
   } else {
     const had = EV.length; const last = had ? EV[had - 1].seq : 0;
-    if (d.tail.length && d.tail[0][0] > last + 1 && had) { EV = await loadEvents(d); mergeTail(d.tail); if (cur > EV.length) cur = EV.length; }
+    if (d.tail.length && d.tail[0][0] > last + 1 && had && Date.now() - lastEvFetch > 300000) { lastEvFetch = Date.now(); EV = await loadEvents(d); mergeTail(d.tail); if (cur > EV.length) cur = EV.length; }
     else mergeTail(d.tail);
   }
   dirty = true;

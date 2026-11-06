@@ -1,0 +1,1 @@
+{"schema":1,"night":"2026-11-06","count":1,"last_seq":8312,"fields":["seq","ts","stage","item","decision","reason","values"],"rows":[[8312,1793983769.6,"supervisor","sys","host_pause","supervisor loop paused 109723s; stages given grace",{}]]}
